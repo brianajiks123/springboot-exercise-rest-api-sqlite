@@ -1,0 +1,23 @@
+# Normalize line endings on commit
+* text=auto
+
+# Shell scripts: LF only (must not be converted to CRLF on Windows)
+*.sh text eol=lf
+
+# Windows batch: keep CRLF
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Binary files: never normalize, never diff
+*.jar binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+
+# Ignore local config/database files from normalization
+/demo1.db -text
+/application.properties -text
+.env -text
