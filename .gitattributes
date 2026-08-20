@@ -17,7 +17,5 @@
 *.ico binary
 *.pdf binary
 
-# Ignore local config/database files from normalization
+# Ignore local database file from normalization
 /demo1.db -text
-/application.properties -text
-.env -text

@@ -41,7 +41,6 @@ application-secret.properties
 *.jks
 *.key
 *.pem
-application.properties
 
 ### Databases (SQLite, etc.) ###
 *.db

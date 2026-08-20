@@ -50,6 +50,31 @@ java -jar target/demo1-0.0.1-SNAPSHOT.jar
 
 The app runs at `http://localhost:8080`.
 
+### Configuration & secrets
+
+Default non-sensitive settings live in `application.properties` (committed):
+port, SQLite database location, JPA/Hibernate flags.
+
+Sensitive values (DB passwords, API keys) are meant to live in a separate
+`application-secret.properties` file, which is **git-ignored**, and override the
+defaults at runtime (Spring Boot loads `application-secret*` with higher
+priority than `application.properties`).
+
+Set it up:
+
+```bash
+# Windows
+copy application-secret.properties.example application-secret.properties
+
+# macOS / Linux
+cp application-secret.properties.example application-secret.properties
+```
+
+Then edit the copied file and fill in the real values.
+
+> **Never commit credentials into `application.properties`** — it is tracked by
+> git. Use `application-secret.properties` for anything sensitive.
+
 ## API Endpoints
 
 All endpoints are prefixed with `/api/products`
