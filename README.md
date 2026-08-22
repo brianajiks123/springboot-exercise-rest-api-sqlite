@@ -1,10 +1,12 @@
-# Demo1 , Product REST API (Spring Boot)
+# Demo1 , Product & Order REST API (Spring Boot)
 
-A simple REST API for **Product** CRUD, built with Spring Boot + Spring Data JPA + Hibernate on an **SQLite** database.
+A simple REST API for **Product** CRUD and **Order** management, built with Spring Boot + Spring Data JPA + Hibernate on an **SQLite** database.
 
 ## Features
 
 - Full CRUD for products (`GET`, `GET by id`, `POST`, `PUT`, `DELETE`).
+- Create/read/delete orders with line items; unit prices are **snapshotted at order time** and a `totalPrice` is computed per order.
+- Orders start with status `PENDING` (options: `PENDING`, `COMPLETED`, `CANCELLED`).
 - Layered architecture: `Controller → Service → Repository`, with **DTOs** separated from the entity (the API does not expose the table structure).
 - Request-body validation via Jakarta Bean Validation.
 - Automatic API documentation via **Swagger UI / OpenAPI 3**.
@@ -77,6 +79,8 @@ Then edit the copied file and fill in the real values.
 
 ## API Endpoints
 
+### Products
+
 All endpoints are prefixed with `/api/products`
 
 | Method | Path | Description |
@@ -113,6 +117,32 @@ curl -X DELETE http://localhost:8080/api/products/1
 
 > **Validation:** `name` is required (max 255 chars), `price` is required and must not be negative, `stock` must not be negative. On validation failure the API returns `400 Bad Request`.
 
+### Orders
+
+All endpoints are prefixed with `/api/orders`
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/orders` | Get all orders with their line items and totals |
+| `GET` | `/api/orders/{id}` | Get order by ID (404 if not found) |
+| `POST` | `/api/orders` | Create a new order (201) |
+| `DELETE` | `/api/orders/{id}` | Delete order by ID (204 / 404) |
+
+**Create an order**
+
+```bash
+curl -X POST http://localhost:8080/api/orders \
+  -H "Content-Type: application/json" \
+  -d '{"items":[{"productId":1,"quantity":2},{"productId":2,"quantity":1}]}'
+```
+
+Each item snapshots the product's current price, and the response includes a
+`totalPrice` computed from those snapshots.
+
+> **Validation:** `items` must not be empty; each item requires a valid
+> `productId` and a `quantity >= 1`. A missing product returns `400 Bad Request`.
+> Note: product stock is not decremented when an order is placed.
+
 ## API Documentation
 
 With the app running:
@@ -132,22 +162,33 @@ demo1/
 └── src/
     ├── main/
     │   ├── java/com/example/demo1/
-    │   │   ├── Demo1Application.java    # Application entry point
+    │   │   ├── Demo1Application.java        # Application entry point
     │   │   ├── controller/
-    │   │   │   └── ProductController.java   # REST endpoints & OpenAPI docs
+    │   │   │   ├── ProductController.java       # REST endpoints & OpenAPI docs
+    │   │   │   └── OrderController.java         # Order endpoints & OpenAPI docs
     │   │   ├── service/
-    │   │   │   └── ProductService.java      # Business logic, entity ↔ DTO mapping
+    │   │   │   ├── ProductService.java          # Product business logic, entity ↔ DTO mapping
+    │   │   │   └── OrderService.java            # Order business logic (pricing snapshot, cascade)
     │   │   ├── repository/
-    │   │   │   └── ProductRepository.java   # Spring Data JPA repository
+    │   │   │   ├── ProductRepository.java       # Spring Data JPA repository
+    │   │   │   └── OrderRepository.java         # Spring Data JPA repository
     │   │   ├── model/
-    │   │   │   └── Product.java             # JPA entity (table `products`)
+    │   │   │   ├── Product.java                 # JPA entity (table `products`)
+    │   │   │   ├── Order.java                   # JPA entity (table `orders`, 1-:N → order_items)
+    │   │   │   └── OrderItem.java               # JPA entity (table `order_items`, N-:1 → Product)
+    │   │   ├── exception/
+    │   │   │   └── GlobalExceptionHandler.java  # Maps service exceptions → HTTP responses
     │   │   └── dto/
-    │   │       ├── ProductRequest.java      # Input payload + validation
-    │   │       └── ProductResponse.java     # Response payload
+    │   │       ├── ProductRequest.java          # Input payload + validation
+    │   │       ├── ProductResponse.java         # Response payload
+    │   │       ├── OrderRequest.java            # Order input payload + validation
+    │   │       ├── OrderItemRequest.java        # Line-item input payload + validation
+    │   │       ├── OrderResponse.java           # Order response (items + computed totalPrice)
+    │   │       └── OrderItemResponse.java       # Line-item response
     │   └── resources/
-    │       └── application.properties        # Server & DB configuration
+    │       └── application.properties            # Server & DB configuration
     └── test/java/com/example/demo1/
-        └── Demo1ApplicationTests.java        # Context smoke test
+        └── Demo1ApplicationTests.java            # Context smoke test
 ```
 
 ## Key Configuration (`application.properties`)
