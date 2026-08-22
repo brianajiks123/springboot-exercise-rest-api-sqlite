@@ -36,7 +36,7 @@ A simple REST API for **Product** CRUD and **Order** management, built with Spri
 
 # macOS / Linux
 ./mvnw spring-boot:run
-```
+```text
 
 Or build and run the jar:
 
@@ -48,7 +48,7 @@ java -jar target\demo1-0.0.1-SNAPSHOT.jar
 # macOS / Linux
 ./mvnw clean package -DskipTests
 java -jar target/demo1-0.0.1-SNAPSHOT.jar
-```
+```text
 
 The app runs at `http://localhost:8080`.
 
@@ -70,7 +70,7 @@ copy application-secret.properties.example application-secret.properties
 
 # macOS / Linux
 cp application-secret.properties.example application-secret.properties
-```
+```text
 
 Then edit the copied file and fill in the real values.
 
@@ -93,27 +93,27 @@ All endpoints are prefixed with `/api/products`
 
 ### Example requests
 
-**Create a product**
+#### Create a product
 
 ```bash
 curl -X POST http://localhost:8080/api/products \
   -H "Content-Type: application/json" \
   -d '{"name":"Laptop","description":"14 inch, 16GB RAM","price":15000000,"stock":10}'
-```
+```text
 
-**Update a product**
+#### Update a product
 
 ```bash
 curl -X PUT http://localhost:8080/api/products/1 \
   -H "Content-Type: application/json" \
   -d '{"name":"Laptop Pro","description":"Updated","price":17000000,"stock":8}'
-```
+```text
 
-**Delete a product**
+#### Delete a product
 
 ```bash
 curl -X DELETE http://localhost:8080/api/products/1
-```
+```text
 
 > **Validation:** `name` is required (max 255 chars), `price` is required and must not be negative, `stock` must not be negative. On validation failure the API returns `400 Bad Request`.
 
@@ -128,13 +128,13 @@ All endpoints are prefixed with `/api/orders`
 | `POST` | `/api/orders` | Create a new order (201) |
 | `DELETE` | `/api/orders/{id}` | Delete order by ID (204 / 404) |
 
-**Create an order**
+#### Create an order
 
 ```bash
 curl -X POST http://localhost:8080/api/orders \
   -H "Content-Type: application/json" \
   -d '{"items":[{"productId":1,"quantity":2},{"productId":2,"quantity":1}]}'
-```
+```text
 
 Each item snapshots the product's current price, and the response includes a
 `totalPrice` computed from those snapshots.
@@ -154,7 +154,7 @@ With the app running:
 
 ## Project Structure
 
-```
+```text
 demo1/
 ├── pom.xml                          # Dependencies & build config (see DEPENDENCIES.md)
 ├── mvnw / mvnw.cmd                  # Maven wrapper
@@ -189,7 +189,7 @@ demo1/
     │       └── application.properties            # Server & DB configuration
     └── test/java/com/example/demo1/
         └── Demo1ApplicationTests.java            # Context smoke test
-```
+```text
 
 ## Key Configuration (`application.properties`)
 
@@ -208,7 +208,7 @@ demo1/
 
 # macOS / Linux
 ./mvnw test
-```
+```text
 
 ## References
 

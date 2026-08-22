@@ -5,7 +5,7 @@ This document describes every dependency declared in `pom.xml` , what it does an
 > All listed dependencies are currently **in use** , there are no unused dependencies. The previously unused `spring-boot-starter-actuator` has been removed.
 
 | Dependency | Purpose | Used in |
-|---|---|---|
+| --- | --- | --- |
 | `spring-boot-starter-webmvc` | Web / REST MVC layer: `@RestController`, `@RequestMapping`, HTTP mapping, JSON serialization via Jackson, embedded Tomcat. | `controller/ProductController.java`, `controller/OrderController.java`, all `/api/*` endpoints. |
 | `spring-boot-starter-data-jpa` | Data / ORM layer (Spring Data JPA + Hibernate): `JpaRepository`, `@Entity`, table-to-object mapping, SQL generation. | `repository/*Repository.java`, `model/*.java`, `service/*Service.java`. |
 | `spring-boot-starter-validation` | Bean validation (Jakarta Bean Validation). Enables `@Valid` and constraint annotations on DTOs. | `dto/*Request.java` (`@NotBlank`, `@Size`, `@NotNull`, `@Min`, `@NotEmpty`), `controller/*Controller.java` (`@Valid @RequestBody`). |
@@ -17,6 +17,7 @@ This document describes every dependency declared in `pom.xml` , what it does an
 ## Detailed notes
 
 ### spring-boot-starter-webmvc
+
 Spring Boot web MVC starter for servlet-based applications. Provides:
 
 - REST controller annotations (`@RestController`, `@GetMapping`, `@PostMapping`, `@PutMapping`, `@DeleteMapping`, `@RequestMapping`).
@@ -26,6 +27,7 @@ Spring Boot web MVC starter for servlet-based applications. Provides:
 Without this dependency the REST endpoints would not run.
 
 ### spring-boot-starter-data-jpa
+
 Spring Data JPA starter combining Spring Data repositories and Hibernate. Provides:
 
 - Repository interfaces (`JpaRepository`) with built-in CRUD methods: `findAll()`, `findById()`, `save()`, `deleteById()`, `existsById()`.
@@ -33,6 +35,7 @@ Spring Data JPA starter combining Spring Data repositories and Hibernate. Provid
 - Transaction management (`@Transactional`).
 
 ### spring-boot-starter-validation
+
 Enables Jakarta Bean Validation 3.0. Used with `@Valid` on the request body to automatically validate DTOs before they reach the service layer. Constraints used in request DTOs:
 
 - `@NotBlank` , field is required and must not be blank.
@@ -42,6 +45,7 @@ Enables Jakarta Bean Validation 3.0. Used with `@Valid` on the request body to a
 - `@NotEmpty`, ensures lists (like order items) are not empty.
 
 ### springdoc-openapi-starter-webmvc-ui
+
 springdoc's starter for Spring Boot 4.x (version 3.1.0). Behavior:
 
 - Scans `@RestController` classes at startup and builds an OpenAPI 3 document.
@@ -49,6 +53,7 @@ springdoc's starter for Spring Boot 4.x (version 3.1.0). Behavior:
 - Descriptions enriched via `@Tag`, `@Operation`, and `@Schema`.
 
 ### sqlite-jdbc
+
 Pure-JDBC driver for SQLite (org.xerial). Connects directly to the `demo1.db` file without a separate database server, as configured in `application.properties`:
 
 ```properties
@@ -57,13 +62,15 @@ spring.datasource.driver-class-name=org.sqlite.JDBC
 ```
 
 ### hibernate-community-dialects
+
 SQLite is not natively supported by Hibernate; its dialect ships in the community package. It is selected via `spring.jpa.database-platform` so Hibernate knows how to translate JPA to SQLite (data types, auto-increment, syntax).
 
 ### spring-boot-starter-webmvc-test
+
 Test scope only , not included in the final jar. Provides integration-test infrastructure (`@SpringBootTest`, JUnit 5, MockMvc support). Used to verify the Spring context loads (`contextLoads()`).
 
 ## Removed dependencies
 
-| Dependency | Reason |
-|---|---|
+| Dependency                     | Reason                                                                                                                                                                             |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `spring-boot-starter-actuator` | No references anywhere in the source or configuration (no actuator endpoints, health checks, or metrics enabled). Dead dependency , removed to shrink the artifact and speed up build/startup. |

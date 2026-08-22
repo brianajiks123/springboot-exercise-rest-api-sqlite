@@ -18,7 +18,7 @@ In a REST API there is no HTML page, so JSON plays the role of the View.
 
 ### In this project
 
-```
+```text
 Client (HTTP request)
     │
     ▼
@@ -32,7 +32,7 @@ ProductRepository   ← talks to the database (via JPA/Hibernate)
     │
     ▼
 SQLite database
-```
+```text
 
 **Key idea:** the Controller never touches the database. It delegates to the Service, which delegates to the Repository.
 
@@ -52,7 +52,7 @@ JPA is a **specification** (a set of interfaces and rules) for mapping Java obje
 // manual JDBC, error-prone and repetitive
 ResultSet rs = stmt.executeQuery("SELECT * FROM products WHERE id = 1");
 String name = rs.getString("name");
-```
+```text
 
 **With JPA:** you just annotate a class and call methods.
 
@@ -65,7 +65,7 @@ public class Product {
     @Column(nullable = false)
     private String name;
 }
-```
+```text
 
 Hibernate then reads those annotations and does the SQL for you.
 
@@ -89,13 +89,13 @@ Spring Data JPA sits on top: you define a repository interface, and it generates
 ```java
 public interface ProductRepository extends JpaRepository<Product, Long> { }
 // Spring dynamically provides an implementation of findAll(), save(), etc.
-```
+```text
 
 **Key idea:**
 
-```
+```text
 @Repository / JpaRepository  ──►  Spring Data JPA  ──►  Hibernate  ──►  Database
-```
+```text
 
 **Related dependencies:** `spring-boot-starter-data-jpa` (brings both Spring Data JPA and Hibernate).
 
@@ -107,9 +107,9 @@ JDBC is the **lowest-level Java API for talking to any database**. It is databas
 
 **In this project:** JDBC is what actually ships bytes to and from the SQLite file. JPA/Hibernate sit *on top of* JDBC , they translate your entity operations into JDBC calls. The `sqlite-jdbc` dependency provides the JDBC driver for SQLite.
 
-```
+```text
 ProductService → JPA/Hibernate → JDBC → sqlite-jdbc driver → demo1.db
-```
+```text
 
 **Key idea:** everyone above JDBC (Hibernate, Spring Data) is sugar. At the lowest level, all Java database access is JDBC.
 
@@ -118,7 +118,7 @@ ProductService → JPA/Hibernate → JDBC → sqlite-jdbc driver → demo1.db
 ```properties
 spring.datasource.url=jdbc:sqlite:demo1.db   # JDBC URL of our database
 spring.datasource.driver-class-name=org.sqlite.JDBC  # which driver to load
-```
+```text
 
 ---
 
@@ -130,7 +130,7 @@ SQLite is a lightweight embedded database, and Hibernate does not support it nat
 
 ```properties
 spring.jpa.database-platform=org.hibernate.community.dialect.SQLiteDialect
-```
+```text
 
 **Key idea:** without a dialect, Hibernate would generate MySQL/PostgreSQL-style SQL that SQLite would reject.
 
@@ -148,13 +148,13 @@ Instead of:
 if (product.getName() == null || product.getName().isEmpty()) {
     throw new IllegalArgumentException("Name is required");
 }
-```
+```text
 
 you write:
 
 ```java
 record ProductRequest(@NotBlank String name) { }
-```
+```text
 
 Spring runs the validation automatically when the controller receives a request, *before* the method body executes:
 
@@ -163,7 +163,7 @@ Spring runs the validation automatically when the controller receives a request,
 public ResponseEntity<ProductResponse> createProduct(@Valid @RequestBody ProductRequest request) {
     // request is already valid here; Spring rejected it above otherwise
 }
-```
+```text
 
 If validation fails, Spring returns `400 Bad Request` automatically , you write no error-handling code.
 
@@ -179,7 +179,7 @@ Spring Boot's Maven plugin creates a special *fat/executable JAR*: your code **p
 
 ```bash
 java -jar target/demo1-0.0.1-SNAPSHOT.jar
-```
+```text
 
 **Why it matters:** no installed Tomcat, no Maven, no classpath juggling , everything needed is inside the file. Deploying is just copying and running one file.
 
@@ -189,7 +189,7 @@ java -jar target/demo1-0.0.1-SNAPSHOT.jar
 
 A single request through the whole stack:
 
-```
+```text
 HTTP GET /api/products/1
         │
         ▼
@@ -212,7 +212,7 @@ demo1.db              returns the row
         │
         ▼
 Jackson               serializes ProductResponse to JSON, sent back to client
-```
+```text
 
 - **JPA** , the spec (annotations + rules).
 - **Hibernate** , the implementation of that spec.
