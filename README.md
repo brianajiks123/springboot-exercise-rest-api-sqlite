@@ -15,7 +15,7 @@ A simple REST API for **Product** CRUD and **Order** management, built with Spri
 ## Tech Stack
 
 | Technology | Version |
-|---|---|
+| --- | --- |
 | Java | 21 |
 | Spring Boot | 4.1.0 |
 | Spring Data JPA (Hibernate) | via starter |
@@ -84,7 +84,7 @@ Then edit the copied file and fill in the real values.
 All endpoints are prefixed with `/api/products`
 
 | Method | Path | Description |
-|---|---|---|
+| --- | --- | --- |
 | `GET` | `/api/products` | Get all products |
 | `GET` | `/api/products/{id}` | Get product by ID (404 if not found) |
 | `POST` | `/api/products` | Create a new product (201) |
@@ -122,7 +122,7 @@ curl -X DELETE http://localhost:8080/api/products/1
 All endpoints are prefixed with `/api/orders`
 
 | Method | Path | Description |
-|---|---|---|
+| --- | --- | --- |
 | `GET` | `/api/orders` | Get all orders with their line items and totals |
 | `GET` | `/api/orders/{id}` | Get order by ID (404 if not found) |
 | `POST` | `/api/orders` | Create a new order (201) |
@@ -148,7 +148,7 @@ Each item snapshots the product's current price, and the response includes a
 With the app running:
 
 | URL | Description |
-|---|---|
+| --- | --- |
 | `http://localhost:8080/swagger-ui.html` | Swagger UI (interactive) |
 | `http://localhost:8080/v3/api-docs` | OpenAPI 3 spec (JSON) |
 
@@ -194,7 +194,7 @@ demo1/
 ## Key Configuration (`application.properties`)
 
 | Property | Value | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | `server.port` | `8080` | HTTP port |
 | `spring.datasource.url` | `jdbc:sqlite:demo1.db` | SQLite database file location |
 | `spring.jpa.database-platform` | `org.hibernate.community.dialect.SQLiteDialect` | SQLite dialect for Hibernate |

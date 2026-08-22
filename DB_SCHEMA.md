@@ -6,10 +6,11 @@ Hibernate auto-generates (updates) this schema on application startup.
 ## Tables Overview
 
 ### 1. `products`
+
 Stores product catalog information.
 
 | Column | Type | Constraints | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `id` | INTEGER | PRIMARY KEY, AUTOINCREMENT | Unique product identifier |
 | `name` | VARCHAR(255) | NOT NULL | Product name |
 | `description` | VARCHAR(255) | | Optional description |
@@ -17,19 +18,21 @@ Stores product catalog information.
 | `stock` | INTEGER | NOT NULL | Current stock availability |
 
 ### 2. `orders`
+
 Stores order header information.
 
 | Column | Type | Constraints | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `id` | INTEGER | PRIMARY KEY, AUTOINCREMENT | Unique order identifier |
 | `order_date` | TIMESTAMP | NOT NULL | Date and time when the order was created |
 | `status` | VARCHAR(255) | NOT NULL | Order status (`PENDING`, `COMPLETED`, `CANCELLED`) |
 
 ### 3. `order_items`
+
 Stores line items for an order, mapping a specific product and quantity to an order.
 
 | Column | Type | Constraints | Description |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `id` | INTEGER | PRIMARY KEY, AUTOINCREMENT | Unique line item identifier |
 | `order_id` | INTEGER | NOT NULL, FOREIGN KEY | References `orders.id` |
 | `product_id` | INTEGER | NOT NULL, FOREIGN KEY | References `products.id` |
