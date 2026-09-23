@@ -46,7 +46,6 @@ public class Order {
         this.status = status;
     }
 
-    /** Keeps the owning side (item.order) and inverse side (items list) in sync. */
     public void addItem(OrderItem item) {
         items.add(item);
         item.setOrder(this);

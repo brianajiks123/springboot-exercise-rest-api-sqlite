@@ -2,6 +2,8 @@ package com.example.demo1.service;
 
 import com.example.demo1.dto.ProductRequest;
 import com.example.demo1.dto.ProductResponse;
+import com.example.demo1.exception.ConflictException;
+import com.example.demo1.repository.OrderItemRepository;
 import com.example.demo1.repository.ProductRepository;
 import com.example.demo1.model.Product;
 import org.springframework.stereotype.Service;
@@ -13,9 +15,11 @@ import java.util.List;
 public class ProductService {
 
     private final ProductRepository productRepository;
+    private final OrderItemRepository orderItemRepository;
 
-    public ProductService(ProductRepository productRepository) {
+    public ProductService(ProductRepository productRepository, OrderItemRepository orderItemRepository) {
         this.productRepository = productRepository;
+        this.orderItemRepository = orderItemRepository;
     }
 
     @Transactional(readOnly = true)
@@ -51,11 +55,20 @@ public class ProductService {
 
     @Transactional
     public boolean deleteById(Long id) {
-        if (productRepository.existsById(id)) {
-            productRepository.deleteById(id);
-            return true;
+        if (!productRepository.existsById(id)) {
+            return false;
         }
-        return false;
+
+        // `order_items.product_id` is a foreign key, so deleting a referenced product
+        // would fail at flush time. Detect it here to return an actionable 409 instead
+        // of an opaque constraint-violation message.
+        if (orderItemRepository.countByProductId(id) > 0) {
+            throw new ConflictException(
+                    "Product " + id + " cannot be deleted because it is referenced by existing orders");
+        }
+
+        productRepository.deleteById(id);
+        return true;
     }
 
     private void applyRequest(Product product, ProductRequest request) {

@@ -11,6 +11,8 @@ import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
 import jakarta.persistence.UniqueConstraint;
 
+import java.math.BigDecimal;
+
 @Entity
 @Table(name = "order_items", uniqueConstraints = @UniqueConstraint(name = "uk_order_product", columnNames = {
         "order_id", "product_id" }))
@@ -20,7 +22,6 @@ public class OrderItem {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    // Owning side of the Order 1-:N relation
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "order_id", nullable = false)
     private Order order;
@@ -32,15 +33,15 @@ public class OrderItem {
     @Column(nullable = false)
     private Integer quantity;
 
-    // Price snapshot taken when the order was created
-    @Column(name = "unit_price", nullable = false)
-    private Double unitPrice;
+    // Price snapshot taken when the order was created. BigDecimal, never double.
+    @Column(name = "unit_price", nullable = false, precision = 19, scale = 2)
+    private BigDecimal unitPrice;
 
     // Empty constructor (required by JPA)
     public OrderItem() {
     }
 
-    public OrderItem(Product product, Integer quantity, Double unitPrice) {
+    public OrderItem(Product product, Integer quantity, BigDecimal unitPrice) {
         this.product = product;
         this.quantity = quantity;
         this.unitPrice = unitPrice;
@@ -78,11 +79,11 @@ public class OrderItem {
         this.quantity = quantity;
     }
 
-    public Double getUnitPrice() {
+    public BigDecimal getUnitPrice() {
         return unitPrice;
     }
 
-    public void setUnitPrice(Double unitPrice) {
+    public void setUnitPrice(BigDecimal unitPrice) {
         this.unitPrice = unitPrice;
     }
 }

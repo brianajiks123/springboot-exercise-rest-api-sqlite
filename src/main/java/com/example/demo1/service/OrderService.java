@@ -12,7 +12,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 @Service
 public class OrderService {
@@ -41,23 +44,64 @@ public class OrderService {
 
     @Transactional
     public OrderResponse create(OrderRequest request) {
-        Order order = new Order(LocalDateTime.now(), Order.Status.PENDING);
+        // Pass 1 , validate the whole request before mutating anything, so an invalid
+        // request can never leave stock partially decremented.
+        List<OrderItem> pendingItems = new ArrayList<>();
+        Set<Long> seenProductIds = new HashSet<>();
+
         for (OrderItemRequest itemRequest : request.items()) {
+            // `order_items` has a unique constraint on (order_id, product_id), so a
+            // repeated product would otherwise fail at flush time with an opaque 409.
+            if (!seenProductIds.add(itemRequest.productId())) {
+                throw new IllegalArgumentException(
+                        "Duplicate productId " + itemRequest.productId()
+                                + ": each product may appear only once per order");
+            }
+
             Product product = productRepository.findById(itemRequest.productId())
                     .orElseThrow(() -> new IllegalArgumentException(
                             "Product with id " + itemRequest.productId() + " does not exist"));
-            OrderItem item = new OrderItem(product, itemRequest.quantity(), product.getPrice());
+
+            if (currentStock(product) < itemRequest.quantity()) {
+                throw new IllegalArgumentException("Insufficient stock for product: " + product.getName());
+            }
+
+            // Snapshot the price now; it must not change if the product is edited later.
+            pendingItems.add(new OrderItem(product, itemRequest.quantity(), product.getPrice()));
+        }
+
+        // Pass 2 , reserve stock and attach the validated items to the order.
+        Order order = new Order(LocalDateTime.now(), Order.Status.PENDING);
+        for (OrderItem item : pendingItems) {
+            Product product = item.getProduct();
+            product.setStock(currentStock(product) - item.getQuantity());
             order.addItem(item);
         }
+
         return OrderResponse.from(orderRepository.save(order));
     }
 
     @Transactional
     public boolean deleteById(Long id) {
-        if (orderRepository.existsById(id)) {
-            orderRepository.deleteById(id);
-            return true;
-        }
-        return false;
+        return orderRepository.findById(id)
+                .map(order -> {
+                    // Give the reserved quantities back, otherwise deleting an order
+                    // would permanently leak stock.
+                    for (OrderItem item : order.getItems()) {
+                        Product product = item.getProduct();
+                        product.setStock(currentStock(product) + item.getQuantity());
+                    }
+                    orderRepository.delete(order);
+                    return true;
+                })
+                .orElse(false);
+    }
+
+    /**
+     * A missing stock value is treated as {@code 0} so legacy rows created before
+     * {@code stock} became mandatory cannot cause an NPE (HTTP 500).
+     */
+    private static int currentStock(Product product) {
+        return product.getStock() == null ? 0 : product.getStock();
     }
 }

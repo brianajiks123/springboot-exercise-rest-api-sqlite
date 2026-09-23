@@ -18,13 +18,12 @@ public record ProductResponse(
 
         @Schema(description = "Product stock", example = "10") Integer stock) {
 
-    /** Maps an entity to a response DTO, avoiding floating-point scientific notation. */
     public static ProductResponse from(Product product) {
         return new ProductResponse(
                 product.getId(),
                 product.getName(),
                 product.getDescription(),
-                BigDecimal.valueOf(product.getPrice()),
+                product.getPrice(),
                 product.getStock());
     }
 }

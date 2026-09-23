@@ -2,6 +2,8 @@ package com.example.demo1.model;
 
 import jakarta.persistence.*;
 
+import java.math.BigDecimal;
+
 @Entity
 @Table(name = "products")
 public class Product {
@@ -15,16 +17,28 @@ public class Product {
 
     private String description;
 
-    @Column(nullable = false)
-    private Double price;
+    /**
+     * Money is stored as {@link BigDecimal}, never as {@code double}: binary floating
+     * point cannot represent decimal amounts exactly and would slowly accumulate
+     * rounding errors across repeated arithmetic.
+     */
+    @Column(nullable = false, precision = 19, scale = 2)
+    private BigDecimal price;
 
     private Integer stock;
+
+    /**
+     * Optimistic-locking version. Hibernate bumps it on every update, so two
+     * concurrent orders cannot both consume the last item in stock.
+     */
+    @Version
+    private Long version;
 
     // Empty Constructor (important for JPA)
     public Product() {
     }
 
-    public Product(String name, String description, Double price, Integer stock) {
+    public Product(String name, String description, BigDecimal price, Integer stock) {
         this.name = name;
         this.description = description;
         this.price = price;
@@ -56,11 +70,11 @@ public class Product {
         this.description = description;
     }
 
-    public Double getPrice() {
+    public BigDecimal getPrice() {
         return price;
     }
 
-    public void setPrice(Double price) {
+    public void setPrice(BigDecimal price) {
         this.price = price;
     }
 
@@ -70,5 +84,9 @@ public class Product {
 
     public void setStock(Integer stock) {
         this.stock = stock;
+    }
+
+    public Long getVersion() {
+        return version;
     }
 }
