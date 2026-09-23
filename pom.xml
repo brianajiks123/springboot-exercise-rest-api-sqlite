@@ -61,17 +61,10 @@
 			<version>3.1.0</version>
 		</dependency>
 
-		<!-- SQLite JDBC -->
+		<!-- H2 Database (file-based, fully compatible with Hibernate) -->
 		<dependency>
-			<groupId>org.xerial</groupId>
-			<artifactId>sqlite-jdbc</artifactId>
-			<version>3.46.1.0</version>
-		</dependency>
-
-		<!-- Hibernate Community Dialects (important for SQLite) -->
-		<dependency>
-			<groupId>org.hibernate.orm</groupId>
-			<artifactId>hibernate-community-dialects</artifactId>
+			<groupId>com.h2database</groupId>
+			<artifactId>h2</artifactId>
 		</dependency>
 	</dependencies>
 

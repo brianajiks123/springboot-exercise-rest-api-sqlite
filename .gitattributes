@@ -17,5 +17,6 @@
 *.ico binary
 *.pdf binary
 
-# Ignore local database file from normalization
-/demo1.db -text
+# Local database files: never normalize, never diff (H2 file-based database)
+/demo1db.mv.db -text
+/demo1db.trace.db -text
