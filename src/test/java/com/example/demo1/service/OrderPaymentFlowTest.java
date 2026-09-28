@@ -14,6 +14,7 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -374,6 +375,115 @@ class OrderPaymentFlowTest {
         } finally {
             pool.shutdownNow();
             assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS), "payment threads did not stop");
+        }
+    }
+
+    /**
+     * Payment is not the only way an order can leave {@code PENDING_PAYMENT}. Cancelling and
+     * deleting also read the status before writing, so both can lose an update to a payment that
+     * commits in between: the order would end up {@code CANCELLED} (or gone) while the stock had
+     * already been deducted, which is exactly the disagreement between the shelf and the sales
+     * record the whole design tries to prevent.
+     *
+     * <p>Both operations are now atomic: cancelling is a conditional {@code UPDATE} like the
+     * payment claim, and deleting takes the order's row lock first. This test drives the two
+     * against each other repeatedly and asserts the only two acceptable outcomes: the order is
+     * {@code PAID} and took one unit, or it was abandoned and took nothing.
+     */
+    @Test
+    void payingAndCancellingTheSameOrderAtOnce_neverCancelsAnOrderThatTookStock() throws Exception {
+        for (int round = 0; round < 8; round++) {
+            Product product = givenProduct("Cancel race " + round, 100.0, 50);
+            OrderResponse order = orderAwaitingPayment(product, 1);
+
+            race(
+                    () -> {
+                        try {
+                            orderService.pay(order.id());
+                            return "PAID";
+                        } catch (ConflictException ex) {
+                            return "REFUSED";
+                        }
+                    },
+                    () -> {
+                        try {
+                            orderService.cancel(order.id());
+                            return "CANCELLED";
+                        } catch (ConflictException ex) {
+                            return "REFUSED";
+                        }
+                    });
+
+            Order.Status status = orderService.findById(order.id()).status();
+            if (status == Order.Status.PAID) {
+                assertEquals(49, stockOf(product.getId()),
+                        "round " + round + ": a paid order must have taken exactly one unit");
+            } else {
+                assertEquals(Order.Status.CANCELLED, status, "round " + round);
+                assertEquals(50, stockOf(product.getId()),
+                        "round " + round + ": an abandoned order must not have taken anything");
+            }
+        }
+    }
+
+    /** The same race against {@code DELETE}, which must not erase a sale that already happened. */
+    @Test
+    void payingAndDeletingTheSameOrderAtOnce_neverDeductsStockForAnOrderThatIsGone() throws Exception {
+        for (int round = 0; round < 8; round++) {
+            Product product = givenProduct("Delete race " + round, 100.0, 50);
+            OrderResponse order = orderAwaitingPayment(product, 1);
+
+            race(
+                    () -> {
+                        try {
+                            orderService.pay(order.id());
+                            return "PAID";
+                        } catch (ConflictException ex) {
+                            return "REFUSED";
+                        }
+                    },
+                    () -> {
+                        try {
+                            return orderService.deleteById(order.id()) ? "DELETED" : "MISSING";
+                        } catch (ConflictException ex) {
+                            return "REFUSED";
+                        }
+                    });
+
+            OrderResponse remaining = orderService.findById(order.id());
+            int stock = stockOf(product.getId());
+            if (remaining == null) {
+                assertEquals(50, stock,
+                        "round " + round + ": an order that no longer exists must not have taken stock");
+            } else {
+                assertEquals(Order.Status.PAID, remaining.status(), "round " + round);
+                assertEquals(49, stock, "round " + round);
+            }
+        }
+    }
+
+    private static List<String> race(Callable<String> first, Callable<String> second) throws Exception {
+        CountDownLatch startGate = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            List<Future<String>> results = new ArrayList<>();
+            for (Callable<String> action : List.of(first, second)) {
+                results.add(pool.submit(() -> {
+                    startGate.await();
+                    return action.call();
+                }));
+            }
+
+            startGate.countDown();
+
+            List<String> outcomes = new ArrayList<>();
+            for (Future<String> result : results) {
+                outcomes.add(result.get(30, TimeUnit.SECONDS));
+            }
+            return outcomes;
+        } finally {
+            pool.shutdownNow();
+            assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS), "race threads did not stop");
         }
     }
 }
