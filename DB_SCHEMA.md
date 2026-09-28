@@ -297,6 +297,12 @@ deducted. `OrderPaymentFlowTest.concurrentPaymentsOfTheSameOrder_deductStockExac
 cashiers against one order and asserts that exactly one of them wins and that a one-unit order removes
 exactly one unit from stock.
 
+Cancelling claims the status the same way, and `DELETE /api/orders/{id}` takes the order's row lock
+(`findByIdForUpdate`) before reading that status, because it has to cascade to `order_items`.
+`OrderPaymentFlowTest.payingAndCancellingTheSameOrderAtOnce_neverCancelsAnOrderThatTookStock()` and
+`payingAndDeletingTheSameOrderAtOnce_neverDeductsStockForAnOrderThatIsGone()` drive each of those
+against a concurrent payment and assert that an abandoned or deleted order never took stock.
+
 Two further details matter:
 
 - **`version` is bumped by hand.** Without it a concurrent `PUT /api/products/{id}` , a

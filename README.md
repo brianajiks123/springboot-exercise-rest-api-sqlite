@@ -35,7 +35,7 @@ and removes the possibility of overselling under concurrency.
 - Decimal money handling: `BigDecimal` / `NUMERIC(19,2)`, never `double`.
 - Automatic API documentation via **Swagger UI / OpenAPI 3**.
 - File-based H2 database (no separate DB server) , `demo1db.mv.db`.
-- 82 automated tests: a context smoke test, cart and payment service suites (including two
+- 84 automated tests: a context smoke test, cart and payment service suites (including four
   concurrency tests), an HTTP contract suite, and an end-to-end suite that drives a real running
   instance over HTTP against a file-backed database.
 
@@ -372,7 +372,7 @@ demo1/
         │   │   └── ApiContractTest.java          # 35 MockMvc tests locking status codes & messages
         │   ├── service/
         │   │   ├── CartServiceTest.java          # 21 tests: cart behaviour & checkout
-        │   │   └── OrderPaymentFlowTest.java     # 16 tests: payment, rollback, concurrency
+        │   │   └── OrderPaymentFlowTest.java     # 18 tests: payment, rollback, concurrency
         │   └── e2e/
         │       └── CashierFlowEndToEndTest.java  # 9 tests over real HTTP on a file-backed H2
         └── resources/
@@ -417,13 +417,13 @@ demo1/
 ./mvnw test
 ```
 
-The suite has **82 tests** across five classes:
+The suite has **84 tests** across five classes:
 
 | Class | Tests | Scope |
 | --- | --- | --- |
 | `Demo1ApplicationTests` | 1 | Spring context loads |
 | `CartServiceTest` | 21 | Cart accumulation, quantity updates, removal, checkout, and that the cart never touches stock |
-| `OrderPaymentFlowTest` | 16 | Payment, rollback, `cancel`/`delete` guards, the `10-7-10-13` regression, and two concurrency races: many orders competing for one unit, and many cashiers competing for one order |
+| `OrderPaymentFlowTest` | 18 | Payment, rollback, `cancel`/`delete` guards, the `10-7-10-13` regression, and four concurrency races: many orders for one unit, many cashiers for one order, and payment racing against `cancel` and against `delete` |
 | `ApiContractTest` | 35 | HTTP contract: status codes and error messages via MockMvc |
 | `CashierFlowEndToEndTest` | 9 | The whole flow over real HTTP against a file-backed database (see below) |
 
@@ -551,9 +551,10 @@ units. There is no "restore" step left, so that can no longer happen.
    Boot's default JSON for validation errors) , see [Error Handling](#error-handling).
 8. **`Order`, `OrderItem`, `Cart` and `CartItem` have no `@Version`**, so concurrent
    modifications to those rows are not protected by optimistic locking (only `Product` is).
-   Payment does not depend on it: the order is claimed with a conditional `UPDATE` on its status.
-   `cancel` and `deleteById` still check the status in Java before writing, so a `cancel` or a
-   `delete` racing against a `pay` on the same order can still lose the update.
+   The order lifecycle does not depend on it: every transition is decided by the database, either
+   with a conditional `UPDATE` on the status (`pay`, `cancel`) or by taking the order's row lock
+   first (`DELETE`, which has to read the row before cascading to its items). Two writes to the same
+   order therefore serialise instead of overwriting each other.
 9. **No unique constraint on `products.name`**, so duplicate product names are allowed.
 10. **No explicit index on `order_items.product_id` or `cart_items.product_id`.** The unique
     constraints are `(order_id, product_id)` and `(cart_id, product_id)`, which cannot serve

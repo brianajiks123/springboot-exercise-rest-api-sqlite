@@ -320,6 +320,8 @@ The application maps that to `409 Conflict` with the message
 by optimistic locking. Where a transition must not be lost, the code does not lean on optimistic
 locking at all: it makes the transition itself conditional. Payment claims the order with
 `UPDATE ... WHERE id = ? AND status = 'PENDING_PAYMENT'` rather than checking the status in Java first.
+Cancelling uses the same conditional `UPDATE`, and deleting takes the row lock instead, because it has
+to read the order before cascading to its items.
 
 > **Here, `@Version` is not the main defence against overselling.** The payment path uses a single
 > conditional `UPDATE` (`... WHERE id = ? AND stock >= ?`), which *prevents* the lost update rather than

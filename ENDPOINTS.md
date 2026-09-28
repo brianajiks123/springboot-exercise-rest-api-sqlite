@@ -316,6 +316,10 @@ Abandons an order that has not been paid.
   - `409 Conflict` , `Order <id> is <STATUS> and can no longer be cancelled`
 - **Side effects:** none. An unpaid order never deducted stock, so there is nothing to give back.
 
+> **Cancelling is a conditional `UPDATE ... WHERE id = ? AND status = 'PENDING_PAYMENT'`**, not a
+> status check followed by a write. A cancel racing against a payment therefore cannot overwrite a
+> settled order: whoever arrives second matches no row and gets `409`.
+
 ### `DELETE /api/orders/{id}`
 
 Deletes an order by its ID. This also cascades to its order items.
@@ -327,6 +331,11 @@ Deletes an order by its ID. This also cascades to its order items.
   - `409 Conflict` , `Order <id> has been paid and cannot be deleted` (a `PAID` order is part of the sales record, and because stock is never restored, deleting it would make the stock count disagree with the record)
 - **Side effects:** none on stock.
 - **Allowed statuses:** `PENDING_PAYMENT` and `CANCELLED`.
+
+> **The order's row is locked before its status is read.** A delete has to read the order and then
+> cascade to its items, so it takes a row lock first. A payment arriving at the same instant either
+> commits before the lock is granted , in which case the delete sees `PAID` and returns `409` , or it
+> waits and then finds no row at all. Either way a settled order is never erased.
 
 ---
 
