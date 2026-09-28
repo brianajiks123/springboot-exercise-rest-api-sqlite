@@ -1,0 +1,325 @@
+package com.example.demo1.service;
+
+import com.example.demo1.dto.CartItemRequest;
+import com.example.demo1.dto.OrderResponse;
+import com.example.demo1.exception.ConflictException;
+import com.example.demo1.model.Order;
+import com.example.demo1.model.Product;
+import com.example.demo1.repository.ProductRepository;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * Covers the "pay at the cashier" lifecycle of an order.
+ *
+ * <p>Deliberately NOT annotated with {@code @Transactional}: each service call must run in its
+ * own transaction, so rollback behaviour is genuinely exercised. That matters most in
+ * {@link #pay_multiProductOrder_rollsBackEveryDecrementWhenOneProductRunsOut()} and in the
+ * concurrency test, which would be meaningless inside one shared test transaction.
+ *
+ * <p>Two of these tests are direct regressions for the design that was replaced:
+ * {@link #cancel_unpaidOrder_doesNotTouchStock()} and
+ * {@link #putStockWhileAnOrderIsUnpaid_noLongerInflatesStock()}.
+ */
+@SpringBootTest
+class OrderPaymentFlowTest {
+
+    @Autowired
+    private OrderService orderService;
+
+    @Autowired
+    private CartService cartService;
+
+    @Autowired
+    private ProductRepository productRepository;
+
+    private Product givenProduct(String name, double price, Integer stock) {
+        return productRepository.save(new Product(name, null, BigDecimal.valueOf(price), stock));
+    }
+
+    private static String newCustomer() {
+        return "cust-" + UUID.randomUUID();
+    }
+
+    private int stockOf(Long productId) {
+        return productRepository.findById(productId).orElseThrow().getStock();
+    }
+
+    /** Walks the real path , cart, checkout , so the order is exactly what a buyer would get. */
+    private OrderResponse orderAwaitingPayment(Product product, int quantity) {
+        String customer = newCustomer();
+        cartService.addItem(customer, new CartItemRequest(product.getId(), quantity));
+        return cartService.checkout(customer);
+    }
+
+    // -------------------------------------------------------------------- pay
+
+    @Test
+    void pay_deductsStockAndMarksTheOrderPaid() {
+        Product product = givenProduct("Laptop", 1000.0, 10);
+        OrderResponse order = orderAwaitingPayment(product, 3);
+
+        assertEquals(10, stockOf(product.getId()), "checkout must not deduct stock");
+
+        OrderResponse paid = orderService.pay(order.id());
+
+        assertEquals(Order.Status.PAID, paid.status());
+        assertNotNull(paid.paidAt());
+        assertEquals(7, stockOf(product.getId()));
+    }
+
+    @Test
+    void pay_twice_returnsConflictAndDoesNotDeductTwice() {
+        Product product = givenProduct("Mouse", 100.0, 10);
+        OrderResponse order = orderAwaitingPayment(product, 3);
+        orderService.pay(order.id());
+
+        ConflictException ex = assertThrows(ConflictException.class, () -> orderService.pay(order.id()));
+
+        assertTrue(ex.getMessage().contains("can no longer be paid"), ex.getMessage());
+        assertEquals(7, stockOf(product.getId()), "the second payment must not deduct again");
+    }
+
+    @Test
+    void pay_unknownOrder_returnsNull() {
+        assertNull(orderService.pay(999_999L));
+    }
+
+    @Test
+    void pay_insufficientStock_returnsConflictAndLeavesTheOrderUnpaid() {
+        Product product = givenProduct("Scarce", 10.0, 2);
+        OrderResponse order = orderAwaitingPayment(product, 2);
+
+        // Another buyer takes the remaining units before this one reaches the cashier.
+        product.setStock(0);
+        productRepository.save(product);
+
+        ConflictException ex = assertThrows(ConflictException.class, () -> orderService.pay(order.id()));
+
+        assertTrue(ex.getMessage().contains("Insufficient stock"), ex.getMessage());
+        assertEquals(Order.Status.PENDING_PAYMENT, orderService.findById(order.id()).status());
+        assertEquals(0, stockOf(product.getId()));
+    }
+
+    @Test
+    void pay_multiProductOrder_rollsBackEveryDecrementWhenOneProductRunsOut() {
+        Product available = givenProduct("Available", 10.0, 10);
+        Product soldOut = givenProduct("SoldOut", 10.0, 5);
+
+        String customer = newCustomer();
+        cartService.addItem(customer, new CartItemRequest(available.getId(), 4));
+        cartService.addItem(customer, new CartItemRequest(soldOut.getId(), 5));
+        OrderResponse order = cartService.checkout(customer);
+
+        // The second product disappears from the shelf while the order waits in the queue.
+        soldOut.setStock(0);
+        productRepository.save(soldOut);
+
+        assertThrows(ConflictException.class, () -> orderService.pay(order.id()));
+
+        assertEquals(10, stockOf(available.getId()),
+                "the decrement of the first product must be rolled back too");
+        assertEquals(Order.Status.PENDING_PAYMENT, orderService.findById(order.id()).status());
+    }
+
+    @Test
+    void pay_bumpsTheProductVersionSoAConcurrentPutCannotSilentlyOverwriteTheSale() {
+        Product product = givenProduct("Versioned", 100.0, 10);
+        long before = productRepository.findById(product.getId()).orElseThrow().getVersion();
+
+        OrderResponse order = orderAwaitingPayment(product, 3);
+        orderService.pay(order.id());
+
+        long after = productRepository.findById(product.getId()).orElseThrow().getVersion();
+        assertTrue(after > before, "settling a sale must advance the version, was " + before + " now " + after);
+    }
+
+    // ----------------------------------------------------------------- cancel
+
+    @Test
+    void cancel_unpaidOrder_doesNotTouchStock() {
+        Product product = givenProduct("Chair", 200.0, 10);
+        OrderResponse order = orderAwaitingPayment(product, 4);
+
+        OrderResponse cancelled = orderService.cancel(order.id());
+
+        assertEquals(Order.Status.CANCELLED, cancelled.status());
+        assertEquals(10, stockOf(product.getId()),
+                "an unpaid order never deducted stock, so cancelling must not add any back");
+    }
+
+    @Test
+    void cancel_paidOrder_returnsConflict() {
+        Product product = givenProduct("Table", 300.0, 10);
+        OrderResponse order = orderAwaitingPayment(product, 2);
+        orderService.pay(order.id());
+
+        ConflictException ex = assertThrows(ConflictException.class, () -> orderService.cancel(order.id()));
+
+        assertTrue(ex.getMessage().contains("can no longer be cancelled"), ex.getMessage());
+        assertEquals(8, stockOf(product.getId()));
+    }
+
+    @Test
+    void cancel_unknownOrder_returnsNull() {
+        assertNull(orderService.cancel(999_999L));
+    }
+
+    // ----------------------------------------------------------------- delete
+
+    @Test
+    void delete_unpaidOrder_removesItWithoutTouchingStock() {
+        Product product = givenProduct("Lamp", 30.0, 10);
+        OrderResponse order = orderAwaitingPayment(product, 3);
+
+        assertTrue(orderService.deleteById(order.id()));
+
+        assertNull(orderService.findById(order.id()));
+        assertEquals(10, stockOf(product.getId()));
+    }
+
+    @Test
+    void delete_cancelledOrder_isAllowed() {
+        Product product = givenProduct("Stool", 40.0, 10);
+        OrderResponse order = orderAwaitingPayment(product, 1);
+        orderService.cancel(order.id());
+
+        assertTrue(orderService.deleteById(order.id()));
+        assertNull(orderService.findById(order.id()));
+    }
+
+    @Test
+    void delete_paidOrder_returnsConflict() {
+        Product product = givenProduct("Desk", 500.0, 10);
+        OrderResponse order = orderAwaitingPayment(product, 2);
+        orderService.pay(order.id());
+
+        ConflictException ex = assertThrows(ConflictException.class, () -> orderService.deleteById(order.id()));
+
+        assertTrue(ex.getMessage().contains("cannot be deleted"), ex.getMessage());
+        assertNotNull(orderService.findById(order.id()), "a paid order is part of the sales record");
+        assertEquals(8, stockOf(product.getId()));
+    }
+
+    @Test
+    void delete_unknownOrder_returnsFalse() {
+        assertFalse(orderService.deleteById(999_999L));
+    }
+
+    // ------------------------------------------------------------- regression
+
+    /**
+     * The exact sequence that used to produce {@code 10 -> 7 -> 10 -> 13}.
+     *
+     * <p>Under the old design the PUT wrote off the order's reservation, and then the
+     * order's cancellation added the reservation back on top of the overwritten value,
+     * inventing three units. In the current model nothing is ever added back, so the stock
+     * can only ever be the physical count minus what has actually been sold.
+     */
+    @Test
+    void putStockWhileAnOrderIsUnpaid_noLongerInflatesStock() {
+        Product product = givenProduct("Laptop", 1000.0, 10);
+
+        // 1. the buyer takes 3 to the cashier; nothing is deducted yet
+        OrderResponse order = orderAwaitingPayment(product, 3);
+        assertEquals(10, stockOf(product.getId()));
+
+        // 2. an admin restates the physical stock while the order is still unpaid
+        product.setStock(10);
+        productRepository.save(product);
+        assertEquals(10, stockOf(product.getId()));
+
+        // 3. the cashier settles the sale: the only deduction in the whole flow
+        orderService.pay(order.id());
+        assertEquals(7, stockOf(product.getId()));
+
+        // 4. the old design reached 13 here. Now the paid order is terminal, and even if it
+        //    could be cancelled there is no restore step left that could add units back.
+        assertThrows(ConflictException.class, () -> orderService.cancel(order.id()));
+        assertThrows(ConflictException.class, () -> orderService.deleteById(order.id()));
+        assertEquals(7, stockOf(product.getId()));
+    }
+
+    // ------------------------------------------------------------ concurrency
+
+    /**
+     * The race the whole redesign exists for: several buyers reach the cashier at the same
+     * instant for the last unit in stock.
+     *
+     * <p>Every order is created through a real checkout while stock is still 1, so all six are
+     * legitimately valid at that moment. Exactly one payment may win; the rest must be refused
+     * with {@code 409} and the stock must land on 0, never below.
+     *
+     * <p>The payment relies on a single conditional UPDATE
+     * ({@code ... WHERE id = ? AND stock >= ?}), so the database arbitrates. The test would fail
+     * under a read-then-write implementation, where two threads can both read {@code 1} and both
+     * write {@code 0}.
+     *
+     * <p>Only {@link ConflictException} is treated as a legitimate loss. Anything else (for
+     * example a lock timeout) is allowed to propagate so the test fails loudly instead of
+     * silently counting it as a correct rejection.
+     */
+    @Test
+    void concurrentPayments_cannotOversellTheLastUnit() throws Exception {
+        Product product = givenProduct("Last unit", 100.0, 1);
+
+        int contenders = 6;
+        List<Long> orderIds = new ArrayList<>();
+        for (int i = 0; i < contenders; i++) {
+            String customer = newCustomer();
+            cartService.addItem(customer, new CartItemRequest(product.getId(), 1));
+            orderIds.add(cartService.checkout(customer).id());
+        }
+        assertEquals(1, stockOf(product.getId()), "checkout must leave the single unit in place");
+
+        CountDownLatch startGate = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(contenders);
+        List<Future<Boolean>> results = new ArrayList<>();
+        try {
+            for (Long orderId : orderIds) {
+                results.add(pool.submit(() -> {
+                    startGate.await();
+                    try {
+                        orderService.pay(orderId);
+                        return Boolean.TRUE;
+                    } catch (ConflictException ex) {
+                        return Boolean.FALSE;
+                    }
+                }));
+            }
+
+            startGate.countDown();
+
+            int paid = 0;
+            for (Future<Boolean> result : results) {
+                if (result.get(30, TimeUnit.SECONDS)) {
+                    paid++;
+                }
+            }
+
+            assertEquals(1, paid, "exactly one payment may win the last unit");
+            assertEquals(0, stockOf(product.getId()), "stock must never go below zero");
+        } finally {
+            pool.shutdownNow();
+            assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS), "payment threads did not stop");
+        }
+    }
+}
