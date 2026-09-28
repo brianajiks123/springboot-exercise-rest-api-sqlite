@@ -16,6 +16,8 @@ import jakarta.persistence.UniqueConstraint;
 @Table(name = "cart_items", uniqueConstraints = @UniqueConstraint(name = "uk_cart_product", columnNames = {
         "cart_id", "product_id" }), indexes = @Index(name = "idx_cart_items_product", columnList = "product_id"))
 public class CartItem {
+    public static final int MAX_QUANTITY = 999;
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;

@@ -47,7 +47,7 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(OptimisticLockingFailureException.class)
     public ResponseEntity<ApiErrorResponse> handleOptimisticLockingFailure(OptimisticLockingFailureException ex,
             HttpServletRequest request) {
-        return error(HttpStatus.CONFLICT, "The product was modified by another request. Please retry.", request,
+        return error(HttpStatus.CONFLICT, "The resource was modified by another request. Please retry.", request,
                 null);
     }
 

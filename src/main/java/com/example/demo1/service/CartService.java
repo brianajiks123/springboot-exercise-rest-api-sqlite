@@ -52,7 +52,12 @@ public class CartService {
         Optional<CartItem> existingLine = findLine(cart, product.getId());
         if (existingLine.isPresent()) {
             CartItem line = existingLine.get();
-            line.setQuantity(line.getQuantity() + request.quantity());
+            int newQuantity = line.getQuantity() + request.quantity();
+            if (newQuantity > CartItem.MAX_QUANTITY) {
+                throw new BadRequestException("Product " + product.getName() + " would reach " + newQuantity
+                        + " units in the cart, but a cart line holds at most " + CartItem.MAX_QUANTITY);
+            }
+            line.setQuantity(newQuantity);
         } else {
             cart.addItem(new CartItem(product, request.quantity()));
         }
