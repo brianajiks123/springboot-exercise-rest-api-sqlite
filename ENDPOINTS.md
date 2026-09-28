@@ -169,10 +169,13 @@ Adds a product to the cart, creating the cart on first use.
 
 - **Request Body (JSON):**
   - `productId`: Long (required, must exist)
-  - `quantity`: integer (required, `1`–`999`)
+  - `quantity`: integer (required, `1`–`999`) , the amount to add, not the resulting total
 - **Success Response:** `200 OK` , the whole updated cart
 - **Error Responses:**
-  - `400 Bad Request` , validation failure, or `Product with id <id> does not exist`
+  - `400 Bad Request` , validation failure, `Product with id <id> does not exist`, or an add that
+    would push the line past `999` units
+  - `409 Conflict` , two *first* requests for the same new `customerId` raced and this one lost the
+    unique constraint on `carts.customer_id`; safe to retry
 
 ```json
 { "productId": 1, "quantity": 2 }
@@ -181,6 +184,13 @@ Adds a product to the cart, creating the cart on first use.
 > **Adding the same product again accumulates.** The second call adds to the existing
 > quantity instead of creating a second line, because `cart_items` is unique on
 > `(cart_id, product_id)`. Adding 2 then 3 leaves one line with quantity 5.
+>
+> **The `1`–`999` limit is on the line, not on the request.** `quantity` is the amount to add, so
+> `999` then `999` would leave 1998 , which `PUT` could never set. A line therefore holds at most
+> `999` units no matter which endpoint fills it: an add that would exceed the limit is rejected with
+> `400` and the message says how many units it would have reached, and the cart is left untouched.
+> The limit lives in one place, `CartItem.MAX_QUANTITY`, which both request payloads and the
+> accumulation check read.
 >
 > **Adding more than is in stock is allowed.** A cart does not reserve anything, and
 > blocking here would make the "buyer fixes the quantity" loop needlessly awkward. The
@@ -191,12 +201,15 @@ Adds a product to the cart, creating the cart on first use.
 Sets the **absolute** quantity of a line, the way typing into a quantity box works.
 
 - **Path Variables:** `customerId` (String), `productId` (Long)
-- **Request Body (JSON):** `{ "quantity": 5 }` (required, `1`–`999`)
+- **Request Body (JSON):** `{ "quantity": 5 }` (required, `1`–`999`) , the new total for the line
 - **Success Response:** `200 OK` , the whole updated cart
-- **Error Responses:** `400 Bad Request` (validation), `404 Not Found` (no such cart or no such line)
+- **Error Responses:** `400 Bad Request` (validation, including a quantity above `999`), `404 Not Found` (no such cart or no such line)
 
 > Sending `0` is rejected. To remove a line, use `DELETE`, so that "remove" has exactly
 > one meaning.
+>
+> This endpoint and `POST .../items` share the same `999` ceiling on a line, which is why
+> `CartItem.MAX_QUANTITY` is a single constant rather than a number repeated in each payload.
 
 ### `DELETE /api/carts/{customerId}/items/{productId}`
 
@@ -356,6 +369,13 @@ Deletes an order by its ID. This also cascades to its order items.
 - `GET /swagger-ui.html` , Interactive Swagger UI.
 - `GET /v3/api-docs` , Raw OpenAPI 3 JSON specification.
 
+> **The document describes the real contract.** springdoc derives nothing from a `ResponseEntity`, so
+> an endpoint with no explicit responses is published as a bare `200` that can never fail. Every
+> operation here therefore declares its actual success code (`201` for a create, `204` for a delete)
+> and each error it can produce, all referencing the `ApiErrorResponse` schema. `OpenApiContractTest`
+> reads the document back over HTTP and fails if any of that drifts, so this is enforced rather than
+> aspirational.
+
 ---
 
 ## 5. Health endpoint
@@ -406,7 +426,7 @@ or an unexpected bug:
 | `HandlerMethodValidationException` / `ConstraintViolationException` , invalid path variable | `400` | `Request validation failed` + `fieldErrors` |
 | `MethodArgumentTypeMismatchException` , path variable that cannot be parsed as its type, e.g. `GET /api/products/abc` | `400` | `Parameter 'id' must be a number, but was 'abc'` |
 | `HttpMessageNotReadableException` , missing or malformed JSON | `400` | `Request body is missing or malformed` |
-| `OptimisticLockingFailureException` | `409` | `The product was modified by another request. Please retry.` |
+| `OptimisticLockingFailureException` | `409` | `The resource was modified by another request. Please retry.` |
 | `DataIntegrityViolationException` (safety net) | `409` | `The request conflicts with the current state of the data.` |
 | Spring's own `ErrorResponse` , unmapped path, unsupported method | `404` / `405` | Spring's detail, or its title |
 | Anything else | `500` | `Unexpected server error` |
@@ -454,7 +474,7 @@ that endpoint deliberately does not exist:
 | `200` | Read, cart update, payment or cancellation succeeded |
 | `201` | Resource created (`POST /api/products`, `POST /api/carts/{id}/checkout`) |
 | `204` | Deleted, no body (`DELETE`) |
-| `400` | Validation failure, a path variable that cannot be parsed (e.g. `/api/products/abc`), or a business-rule violation on the request itself (unknown product, empty cart, not enough stock at checkout) |
+| `400` | Validation failure, a path variable that cannot be parsed (e.g. `/api/products/abc`), an add that would push a cart line past `999` units, or a business-rule violation on the request itself (unknown product, empty cart, not enough stock at checkout) |
 | `404` | Resource does not exist (product, order, cart, or cart line) |
 | `405` | `POST /api/orders` , orders are created by a cart checkout |
 | `409` | State conflict: insufficient stock at payment, wrong order status, product still referenced, concurrent modification, constraint violation |

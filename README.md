@@ -30,6 +30,14 @@ and removes the possibility of overselling under concurrency.
   lock (`SELECT ... FOR UPDATE`) before reading it, so two simultaneous `addItem` calls cannot both
   read the same quantity and write it back. The second waits and then sees the first, which is what
   stops an increment from disappearing without an error.
+- **One quantity limit for a cart line, however it is reached.** A line holds at most 999 units,
+  whether that comes from `PUT` (which sets an absolute value) or from repeated `POST` (which
+  accumulates). An add that would push a line past 999 is rejected with `400` naming the number it
+  would have reached, so the two ways of filling a line cannot disagree.
+- **A published API contract that matches the code.** Every endpoint declares the status codes it
+  really returns, so `/v3/api-docs` and Swagger UI show `201` for a create, `204` for a delete, and
+  the `400`/`404`/`409`/`500` each call can produce , all carrying the shared `ApiErrorResponse`
+  body. `OpenApiContractTest` reads the document back over HTTP and fails if any of that drifts.
 - **N+1-free listing:** `OrderRepository` and `CartRepository` use `@EntityGraph` to fetch items
   and their products in a single query.
 - Layered architecture: `Controller → Service → Repository`, with **DTOs** separated from the entity
@@ -190,8 +198,8 @@ cart is identified by a client-supplied `customerId` (for example `budi`).
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/api/carts/{customerId}` | Get the cart (empty cart if the customer has none; reading never creates one) |
-| `POST` | `/api/carts/{customerId}/items` | Add a product, accumulating into an existing line (200) |
-| `PUT` | `/api/carts/{customerId}/items/{productId}` | Set the absolute quantity of a line (200 / 404) |
+| `POST` | `/api/carts/{customerId}/items` | Add a product, accumulating into an existing line; a line never passes 999 units (200 / 400) |
+| `PUT` | `/api/carts/{customerId}/items/{productId}` | Set the absolute quantity of a line, `1`–`999` (200 / 400 / 404) |
 | `DELETE` | `/api/carts/{customerId}/items/{productId}` | Remove one line (204 / 404) |
 | `DELETE` | `/api/carts/{customerId}` | Empty the cart (204 / 404) |
 | `POST` | `/api/carts/{customerId}/checkout` | Create an order awaiting payment and empty the cart (201 / 400 / 404) |
@@ -323,7 +331,7 @@ Every failure , whatever raised it , is rendered as the same JSON body by
 | `HandlerMethodValidationException` / `ConstraintViolationException` (bad path variable) | `400 Bad Request` | `Request validation failed`, with `fieldErrors` filled in |
 | `MethodArgumentTypeMismatchException` (path variable that cannot be parsed as its type) | `400 Bad Request` | `Parameter 'id' must be a number, but was 'abc'` |
 | `HttpMessageNotReadableException` | `400 Bad Request` | `Request body is missing or malformed` |
-| `OptimisticLockingFailureException` | `409 Conflict` | `The product was modified by another request. Please retry.` |
+| `OptimisticLockingFailureException` | `409 Conflict` | `The resource was modified by another request. Please retry.` |
 | `DataIntegrityViolationException` | `409 Conflict` | `The request conflicts with the current state of the data.` |
 | Spring's own `ErrorResponse` (unmapped path, wrong method) | `404` / `405` | Spring's own detail, or its title |
 | Anything else | `500 Internal Server Error` | `Unexpected server error` , the real cause is logged, never returned |
@@ -373,6 +381,16 @@ With the app running:
 | `http://localhost:8080/swagger-ui.html` | Swagger UI (interactive) |
 | `http://localhost:8080/v3/api-docs` | OpenAPI 3 spec (JSON) |
 
+> **The document is only as good as what the controllers declare.** springdoc cannot infer a status
+> code from a `ResponseEntity`, so an endpoint without explicit responses is published as a bare
+> `200` with no way to fail , which is exactly what every operation used to look like. Each one now
+> carries an `@ApiResponse` for its real success code, plus `@ApiBadRequest` / `@ApiNotFound` /
+> `@ApiConflict` / `@ApiServerError` where they apply. Those four are small composed annotations in
+> `openapi/`, each attaching the shared `ApiErrorResponse` schema, so the error contract is stated
+> once instead of repeated per endpoint. `OpenApiContractTest` reads `/v3/api-docs` back over HTTP
+> and fails if an operation loses its success code, loses its error responses, or stops referencing
+> that schema.
+
 ## Project Structure
 
 ```text
@@ -414,16 +432,21 @@ demo1/
     │   │   │   ├── ConflictException.java       # Runtime exception → 409 Conflict
     │   │   │   ├── NotFoundException.java       # Runtime exception → 404 Not Found
     │   │   │   └── GlobalExceptionHandler.java  # @RestControllerAdvice: every failure → ApiErrorResponse
-    │   │   └── dto/
-    │   │       ├── ApiErrorResponse.java        # The one error body: status, message, path, fieldErrors
-    │   │       ├── ProductRequest.java          # Input payload + validation
-    │   │       ├── ProductResponse.java         # Response payload
-    │   │       ├── CartItemRequest.java         # Add-to-cart payload
-    │   │       ├── CartItemQuantityRequest.java # Absolute-quantity payload
-    │   │       ├── CartResponse.java            # Cart with live prices and running total
-    │   │       ├── CartItemResponse.java        # Cart line response
-    │   │       ├── OrderResponse.java           # Order response (items + computed totalPrice)
-    │   │       └── OrderItemResponse.java       # Order line response
+    │   │   ├── dto/
+    │   │   │   ├── ApiErrorResponse.java        # The one error body: status, message, path, fieldErrors
+    │   │   │   ├── ProductRequest.java          # Input payload + validation
+    │   │   │   ├── ProductResponse.java         # Response payload
+    │   │   │   ├── CartItemRequest.java         # Add-to-cart payload
+    │   │   │   ├── CartItemQuantityRequest.java # Absolute-quantity payload
+    │   │   │   ├── CartResponse.java            # Cart with live prices and running total
+    │   │   │   ├── CartItemResponse.java        # Cart line response
+    │   │   │   ├── OrderResponse.java           # Order response (items + computed totalPrice)
+    │   │   │   └── OrderItemResponse.java       # Order line response
+    │   │   └── openapi/
+    │   │       ├── ApiBadRequest.java           # Composed @ApiResponse: 400 + ApiErrorResponse
+    │   │       ├── ApiNotFound.java             # Composed @ApiResponse: 404 + ApiErrorResponse
+    │   │       ├── ApiConflict.java             # Composed @ApiResponse: 409 + ApiErrorResponse
+    │   │       └── ApiServerError.java          # Composed @ApiResponse: 500 + ApiErrorResponse
     │   └── resources/
     │       ├── application.properties            # Server, DB & actuator configuration
     │       └── application-dev.properties        # `dev` profile: SQL logging only
@@ -431,10 +454,11 @@ demo1/
         ├── java/com/example/demo1/
         │   ├── Demo1ApplicationTests.java        # Context smoke test
         │   ├── controller/
-        │   │   └── ApiContractTest.java          # 43 MockMvc tests locking status codes, error envelope & messages
+        │   │   ├── ApiContractTest.java          # 45 MockMvc tests locking status codes, error envelope & messages
+        │   │   └── OpenApiContractTest.java      # 3 tests reading /v3/api-docs back over HTTP
         │   ├── service/
-        │   │   ├── CartServiceTest.java          # 22 tests: cart behaviour, checkout & concurrent adds
-        │   │   └── OrderPaymentFlowTest.java     # 18 tests: payment, rollback, concurrency
+        │   │   ├── CartServiceTest.java          # 25 tests: cart behaviour, checkout, races & the 999 line cap
+        │   │   └── OrderPaymentFlowTest.java     # 19 tests: payment, rollback, concurrency
         │   └── e2e/
         │       └── CashierFlowEndToEndTest.java  # 10 tests over real HTTP on a file-backed H2
         └── resources/
@@ -490,17 +514,18 @@ automatic detection is skipped").
 ./mvnw test
 ```
 
-The suite has **94 tests** across five classes:
+The suite has **103 tests** across six classes:
 
 | Class | Tests | Scope |
 | --- | --- | --- |
 | `Demo1ApplicationTests` | 1 | Spring context loads |
-| `CartServiceTest` | 22 | Cart accumulation, quantity updates, removal, checkout, that the cart never touches stock, and one concurrency race: many simultaneous adds of the same product |
-| `OrderPaymentFlowTest` | 18 | Payment, rollback, `cancel`/`delete` guards, the `10-7-10-13` regression, and four concurrency races: many orders for one unit, many cashiers for one order, and payment racing against `cancel` and against `delete` |
-| `ApiContractTest` | 43 | HTTP contract via MockMvc: status codes, the shared error envelope (including every not-found path, unmapped paths and wrong methods), body/path-variable validation (including a path variable that cannot be parsed as its type), and the exact error messages |
+| `CartServiceTest` | 25 | Cart accumulation, quantity updates, removal, checkout, that the cart never touches stock, the 999-unit line limit, and two concurrency races: many simultaneous adds of one product, and two checkouts of one cart |
+| `OrderPaymentFlowTest` | 19 | Payment, rollback, `cancel`/`delete` guards, the `10-7-10-13` regression, a stale product write being rejected, and four concurrency races: many orders for one unit, many cashiers for one order, and payment racing against `cancel` and against `delete` |
+| `ApiContractTest` | 45 | HTTP contract via MockMvc: status codes, the shared error envelope (including every not-found path, unmapped paths and wrong methods), body/path-variable validation (including a path variable that cannot be parsed as its type), the quantity limits, and the exact error messages |
+| `OpenApiContractTest` | 3 | The OpenAPI document served at `/v3/api-docs`: every operation's success code, that no operation is published without an error response, and that every error response carries the shared `ApiErrorResponse` schema |
 | `CashierFlowEndToEndTest` | 10 | The whole flow over real HTTP against a file-backed database, plus the health endpoint (see below) |
 
-Four of the five classes run against an isolated in-memory H2 database
+Five of the six classes run against an isolated in-memory H2 database
 (`src/test/resources/application.properties`, `jdbc:h2:mem:demo1test` with
 `ddl-auto=create-drop`), so they never read or modify the on-disk `demo1db.mv.db`.
 `CashierFlowEndToEndTest` deliberately uses its own file-backed database instead , see
@@ -512,7 +537,7 @@ Three deliberate design choices in the test suite:
   must run in its own transaction so that real commit/rollback behaviour is
   verified; a test-level transaction would join the service transaction and make
   "stock was left untouched" assertions meaningless.
-- **The four in-memory `@SpringBootTest` classes share one database** (`demo1test`,
+- **The five in-memory `@SpringBootTest` classes share one database** (`demo1test`,
   kept alive by `DB_CLOSE_DELAY=-1`) because Spring reuses the cached application
   context. Rows created in one class are still visible in the others, so tests must
   not rely on global row counts or on `id` values starting at 1, and every cart test
@@ -625,9 +650,12 @@ units. There is no "restore" step left, so that can no longer happen.
    serialise instead of overwriting each other.
 7. **No unique constraint on `products.name`**, so duplicate product names are allowed.
 
-Three former limitations have since been fixed and are listed here only so the reasoning survives:
-`description` no longer has a DTO/column mismatch (both are 255), every error path now returns the
-same JSON envelope, and `order_items.product_id` / `cart_items.product_id` are indexed.
+Six former limitations have since been fixed and are listed here only so the reasoning survives:
+`description` no longer has a DTO/column mismatch (both are 255); every error path returns the same
+JSON envelope; `order_items.product_id` / `cart_items.product_id` are indexed; the published OpenAPI
+document no longer advertises `200` for every operation with no error responses at all; a cart line
+can no longer pass 999 units by accumulating; and the `409` for a concurrent modification no longer
+names a product it cannot verify.
 
 ### Upgrading an existing database
 

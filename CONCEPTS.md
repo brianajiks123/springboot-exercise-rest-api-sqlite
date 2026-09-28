@@ -324,7 +324,15 @@ Hibernate then:
    `OptimisticLockingFailureException`.
 
 The application maps that to `409 Conflict` with the message
-`The product was modified by another request. Please retry.`
+`The resource was modified by another request. Please retry.`
+
+> **Why "resource" and not "product".** This handler catches a whole family
+> (`OptimisticLockingFailureException` and its subclasses, which is where Hibernate's stale-state
+> failures land), so naming a specific table in the message is a claim the handler cannot verify. It
+> used to say *product*, and that became visibly wrong: two concurrent checkouts of one cart produced
+> a `409` blaming a product nobody had modified. The cart's row lock removed that particular trigger,
+> but the wording was the actual defect , any future stale write would have mislabelled itself the
+> same way. The body's `path` field already tells a client which endpoint conflicted.
 
 **Key idea:** the client is expected to *retry*, not to be blocked. `Product` has `@Version`;
 `Order`, `OrderItem`, `Cart` and `CartItem` do not, so concurrent edits to those rows are not protected
@@ -528,6 +536,56 @@ failed. Two consequences are worth calling out:
 > now reach the advice , as `MethodArgumentNotValidException` for a request body and as
 > `HandlerMethodValidationException` for path variables , and come back with `fieldErrors` filled in
 > instead of as Spring Boot's default error document.
+
+---
+
+## Documenting the contract (springdoc / OpenAPI)
+
+springdoc reads the controllers at startup and serves an OpenAPI 3 document at `/v3/api-docs`, which
+Swagger UI renders. It is **generated, not written**, so it can only be as accurate as the annotations
+allow.
+
+**What it can infer:** the path, the HTTP method, the request body schema, and the success response
+schema (from the method's return type).
+
+**What it cannot infer: the status code.** A method returning `ResponseEntity` hides the status inside
+the method body, and springdoc does not execute it, so it assumes `200` for every operation. That is
+wrong here for anything that creates or deletes:
+
+| Endpoint | Actually returns | springdoc assumed |
+| --- | --- | --- |
+| `POST /api/products` | `201` | `200` |
+| `POST /api/carts/{customerId}/checkout` | `201` | `200` |
+| every `DELETE` | `204` | `200` |
+| any call that fails | `400` / `404` / `409` / `500` | *(nothing at all)* |
+
+The last row is the more serious half. With no `@ApiResponse`, the published contract says an operation
+cannot fail, and `ApiErrorResponse` never even reaches `components` , so a generated client has no idea
+what an error body looks like, despite every failure returning one.
+
+**The fix is to declare each response:**
+
+```java
+@ApiResponse(responseCode = "201", description = "The product was created",
+        content = @Content(schema = @Schema(implementation = ProductResponse.class)))
+@ApiBadRequest
+@ApiServerError
+```
+
+Declaring *any* response replaces the implicit `200`, so the success code has to be stated explicitly
+as well , which is exactly what makes `201` and `204` show up correctly instead of `200`.
+
+**Why the error responses are composed annotations.** `@ApiBadRequest`, `@ApiNotFound`, `@ApiConflict`
+and `@ApiServerError` (in `openapi/`) each carry a single `@ApiResponse` pointing at
+`ApiErrorResponse`. Sixteen endpoints times up to four error responses would otherwise be sixty-odd
+near-identical blocks, and changing the error schema would mean editing every one. springdoc expands
+the composed annotations, so the generated document is the same as if they were written out.
+
+> **A published contract is worth testing.** `OpenApiContractTest` fetches `/v3/api-docs` over HTTP,
+> parses it, and asserts that every operation declares the success code it really returns, that no
+> operation is published without an error response, and that every error response references
+> `ApiErrorResponse`. A new endpoint fails that test until its contract is decided , which is the
+> point, because this document drifted from the code precisely because nothing checked it.
 
 ---
 
