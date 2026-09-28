@@ -26,12 +26,12 @@ public record CartResponse(
                 .toList();
 
         int totalItems = items.stream()
-                .mapToInt(CartItemResponse::quantity)
+                .mapToInt(item -> item.quantity())
                 .sum();
 
         BigDecimal totalPrice = items.stream()
-                .map(CartItemResponse::subtotal)
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
+                .map(item -> item.subtotal())
+                .reduce(BigDecimal.ZERO, (running, line) -> running.add(line));
 
         return new CartResponse(cart.getCustomerId(), items, totalItems, totalPrice, cart.getUpdatedAt());
     }

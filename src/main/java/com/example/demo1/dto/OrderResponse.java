@@ -26,7 +26,7 @@ public record OrderResponse(
                 .toList();
         BigDecimal total = itemResponses.stream()
                 .map(item -> item.unitPrice().multiply(BigDecimal.valueOf(item.quantity())))
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
+                .reduce(BigDecimal.ZERO, (running, line) -> running.add(line));
         return new OrderResponse(
                 order.getId(),
                 order.getOrderDate(),
