@@ -322,4 +322,58 @@ class OrderPaymentFlowTest {
             assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS), "payment threads did not stop");
         }
     }
+
+    /**
+     * The mirror image of the test above: instead of many orders competing for one unit, many
+     * cashiers compete for the <em>same</em> order.
+     *
+     * <p>A read-then-write status check is not enough here. Two threads can both read
+     * {@code PENDING_PAYMENT}, both pass the check, and both deduct stock, so a one-unit order
+     * would take several units off the shelf while the sales record shows only one. The claim is
+     * therefore a single conditional UPDATE on the status
+     * ({@code ... WHERE id = ? AND status = ?}), and only the thread that wins it goes on to
+     * touch stock. This test fails against the earlier implementation, which deducted 4-5 units.
+     *
+     * <p>Only {@link ConflictException} is treated as a legitimate loss, as above.
+     */
+    @Test
+    void concurrentPaymentsOfTheSameOrder_deductStockExactlyOnce() throws Exception {
+        Product product = givenProduct("One order", 100.0, 100);
+        OrderResponse order = orderAwaitingPayment(product, 1);
+
+        int cashiers = 6;
+        CountDownLatch startGate = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(cashiers);
+        List<Future<Boolean>> results = new ArrayList<>();
+        try {
+            for (int i = 0; i < cashiers; i++) {
+                results.add(pool.submit(() -> {
+                    startGate.await();
+                    try {
+                        orderService.pay(order.id());
+                        return Boolean.TRUE;
+                    } catch (ConflictException ex) {
+                        return Boolean.FALSE;
+                    }
+                }));
+            }
+
+            startGate.countDown();
+
+            int paid = 0;
+            for (Future<Boolean> result : results) {
+                if (result.get(30, TimeUnit.SECONDS)) {
+                    paid++;
+                }
+            }
+
+            assertEquals(1, paid, "only one cashier may settle a given order");
+            assertEquals(99, stockOf(product.getId()),
+                    "a single one-unit order must take exactly one unit off the shelf");
+            assertEquals(Order.Status.PAID, orderService.findById(order.id()).status());
+        } finally {
+            pool.shutdownNow();
+            assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS), "payment threads did not stop");
+        }
+    }
 }
