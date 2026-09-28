@@ -2,7 +2,6 @@ package com.example.demo1.dto;
 
 import com.example.demo1.model.OrderItem;
 import io.swagger.v3.oas.annotations.media.Schema;
-
 import java.math.BigDecimal;
 
 @Schema(description = "Order line item returned to the client")

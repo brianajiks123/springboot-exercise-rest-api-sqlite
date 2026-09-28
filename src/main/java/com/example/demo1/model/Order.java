@@ -10,7 +10,6 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.Table;
-
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -18,23 +17,6 @@ import java.util.List;
 @Entity
 @Table(name = "orders")
 public class Order {
-
-    /**
-     * Lifecycle of an order in the "pay at the cashier" flow:
-     *
-     * <pre>
-     * checkout  ->  PENDING_PAYMENT  --pay-->  PAID
-     *                     |
-     *                     +--cancel-->  CANCELLED
-     * </pre>
-     *
-     * <p>Stock is deducted <strong>only</strong> on the {@code PENDING_PAYMENT -> PAID}
-     * transition, and exactly once. {@code PAID} is terminal: a paid order can be neither
-     * cancelled nor deleted, so stock is never given back and can never be counted twice.
-     *
-     * <p>There is no {@code COMPLETED} state: in this model paying at the cashier <em>is</em>
-     * the completion of the sale, so a separate state would never be reached.
-     */
     public enum Status {
         PENDING_PAYMENT, PAID, CANCELLED
     }
@@ -43,7 +25,6 @@ public class Order {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    /** When the order was created (cart checkout). */
     @Column(nullable = false)
     private LocalDateTime orderDate;
 
@@ -51,7 +32,6 @@ public class Order {
     @Column(nullable = false)
     private Status status = Status.PENDING_PAYMENT;
 
-    /** When the cashier confirmed payment. {@code null} until the order is paid. */
     @Column(name = "paid_at")
     private LocalDateTime paidAt;
 

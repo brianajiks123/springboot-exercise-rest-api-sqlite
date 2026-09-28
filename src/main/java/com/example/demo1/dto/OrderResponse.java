@@ -2,14 +2,12 @@ package com.example.demo1.dto;
 
 import com.example.demo1.model.Order;
 import io.swagger.v3.oas.annotations.media.Schema;
-
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
 
 @Schema(description = "Order representation returned to the client")
 public record OrderResponse(
-
         @Schema(description = "Order ID", example = "1") Long id,
 
         @Schema(description = "When the order was created (cart checkout)", example = "2026-08-20T12:00:00") LocalDateTime orderDate,

@@ -10,14 +10,12 @@ import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
 import jakarta.persistence.UniqueConstraint;
-
 import java.math.BigDecimal;
 
 @Entity
 @Table(name = "order_items", uniqueConstraints = @UniqueConstraint(name = "uk_order_product", columnNames = {
         "order_id", "product_id" }))
 public class OrderItem {
-
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;

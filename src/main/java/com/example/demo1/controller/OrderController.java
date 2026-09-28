@@ -11,22 +11,12 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
-
 import java.util.List;
 
-/**
- * Orders awaiting payment at the cashier.
- *
- * <p>There is intentionally no {@code POST /api/orders}: an order is always born from a cart
- * checkout ({@code POST /api/carts/{customerId}/checkout}), which is what keeps prices and
- * line items consistent with what the buyer actually put in the cart. What is left here are
- * the cashier's actions on an existing order.
- */
 @RestController
 @RequestMapping("/api/orders")
 @Tag(name = "Orders", description = "Orders awaiting payment at the cashier")
 public class OrderController {
-
     private final OrderService orderService;
 
     public OrderController(OrderService orderService) {

@@ -11,20 +11,10 @@ import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
 import jakarta.persistence.UniqueConstraint;
 
-/**
- * One line of a {@link Cart}.
- *
- * <p>Unlike {@link OrderItem}, a cart line does <strong>not</strong> snapshot the price:
- * a cart shows the live catalogue price, and the price is frozen into the order only at
- * checkout. The unique constraint on {@code (cart_id, product_id)} guarantees one line
- * per product, which is why "add to cart" accumulates into the existing line instead of
- * creating a second one.
- */
 @Entity
 @Table(name = "cart_items", uniqueConstraints = @UniqueConstraint(name = "uk_cart_product", columnNames = {
         "cart_id", "product_id" }))
 public class CartItem {
-
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;

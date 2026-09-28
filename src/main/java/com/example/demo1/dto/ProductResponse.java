@@ -2,12 +2,10 @@ package com.example.demo1.dto;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 import com.example.demo1.model.Product;
-
 import java.math.BigDecimal;
 
 @Schema(description = "Product representation returned to the client")
 public record ProductResponse(
-
         @Schema(description = "Product ID", example = "1") Long id,
 
         @Schema(description = "Product name", example = "Laptop") String name,

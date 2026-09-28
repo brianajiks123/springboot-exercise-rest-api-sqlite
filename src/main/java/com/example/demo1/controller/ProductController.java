@@ -16,14 +16,12 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
-
 import java.util.List;
 
 @RestController
 @RequestMapping("/api/products")
 @Tag(name = "Products", description = "CRUD operations for products")
 public class ProductController {
-
     private final ProductService productService;
 
     public ProductController(ProductService productService) {

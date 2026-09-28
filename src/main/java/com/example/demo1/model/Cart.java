@@ -9,27 +9,13 @@ import jakarta.persistence.Id;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.Table;
 import jakarta.persistence.UniqueConstraint;
-
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * A customer's shopping cart.
- *
- * <p>The project has no authentication yet, so a cart is identified by a
- * client-supplied {@code customerId} string (see {@code /api/carts/{customerId}}).
- *
- * <p><strong>A cart never reserves stock.</strong> Adding, changing or removing items
- * only writes to {@code cart_items}; {@code products.stock} is not read for writes and
- * is not modified. Stock is deducted exactly once, when the cashier confirms payment
- * ({@code POST /api/orders/{id}/pay}). This is what removes both the oversell race and
- * the "restored stock" double-counting of the previous design.
- */
 @Entity
 @Table(name = "carts", uniqueConstraints = @UniqueConstraint(name = "uk_cart_customer", columnNames = "customer_id"))
 public class Cart {
-
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
@@ -52,19 +38,11 @@ public class Cart {
         this.updatedAt = updatedAt;
     }
 
-    /**
-     * Adds a line and maintains the owning side of the association.
-     */
     public void addItem(CartItem item) {
         items.add(item);
         item.setCart(this);
     }
 
-    /**
-     * Removes a line. {@code orphanRemoval} turns this into a {@code DELETE} on flush,
-     * so the caller must not also null out the back-reference (that would try to write a
-     * {@code NULL} into the non-nullable {@code cart_id} column first).
-     */
     public void removeItem(CartItem item) {
         items.remove(item);
     }

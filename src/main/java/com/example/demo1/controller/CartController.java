@@ -19,19 +19,10 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-/**
- * The cart a buyer fills before going to the cashier.
- *
- * <p>There is no authentication yet, so the cart is addressed by a client-supplied
- * {@code customerId} in the path (for example {@code /api/carts/budi}). Anyone who knows the
- * id can read and change that cart; that is an accepted limitation of this exercise, not a
- * security boundary.
- */
 @RestController
 @RequestMapping("/api/carts/{customerId}")
 @Tag(name = "Carts", description = "Shopping cart of one customer, identified by customerId")
 public class CartController {
-
     private final CartService cartService;
 
     public CartController(CartService cartService) {
