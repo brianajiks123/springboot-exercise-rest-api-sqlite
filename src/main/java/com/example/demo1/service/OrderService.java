@@ -71,22 +71,23 @@ public class OrderService {
 
     @Transactional
     public OrderResponse cancel(Long id) {
-        Order order = orderRepository.findById(id).orElse(null);
-        if (order == null) {
-            return null;
-        }
-        if (order.getStatus() != Order.Status.PENDING_PAYMENT) {
+        int cancelled = orderRepository.cancelIfPending(id, Order.Status.CANCELLED,
+                Order.Status.PENDING_PAYMENT);
+        if (cancelled == 0) {
+            Order existing = orderRepository.findById(id).orElse(null);
+            if (existing == null) {
+                return null;
+            }
             throw new ConflictException(
-                    "Order " + id + " is " + order.getStatus() + " and can no longer be cancelled");
+                    "Order " + id + " is " + existing.getStatus() + " and can no longer be cancelled");
         }
 
-        order.setStatus(Order.Status.CANCELLED);
-        return OrderResponse.from(orderRepository.save(order));
+        return OrderResponse.from(orderRepository.findById(id).orElseThrow());
     }
 
     @Transactional
     public boolean deleteById(Long id) {
-        Order order = orderRepository.findById(id).orElse(null);
+        Order order = orderRepository.findByIdForUpdate(id).orElse(null);
         if (order == null) {
             return false;
         }
