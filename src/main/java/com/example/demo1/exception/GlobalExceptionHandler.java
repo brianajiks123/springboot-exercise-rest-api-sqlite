@@ -20,6 +20,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -95,6 +96,15 @@ public class GlobalExceptionHandler {
         return error(HttpStatus.BAD_REQUEST, "Request body is missing or malformed", request, null);
     }
 
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ApiErrorResponse> handleTypeMismatch(MethodArgumentTypeMismatchException ex,
+            HttpServletRequest request) {
+        return error(HttpStatus.BAD_REQUEST,
+                "Parameter '" + ex.getName() + "' must be " + expectedType(ex.getRequiredType())
+                        + ", but was '" + ex.getValue() + "'",
+                request, null);
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiErrorResponse> handleUnexpected(Exception ex, HttpServletRequest request) {
         if (ex instanceof ErrorResponse frameworkError) {
@@ -105,6 +115,19 @@ public class GlobalExceptionHandler {
 
         log.error("Unhandled exception for {} {}", request.getMethod(), request.getRequestURI(), ex);
         return error(HttpStatus.INTERNAL_SERVER_ERROR, "Unexpected server error", request, null);
+    }
+
+    private static String expectedType(Class<?> required) {
+        if (required == null) {
+            return "a valid value";
+        }
+        if (Number.class.isAssignableFrom(required)) {
+            return "a number";
+        }
+        if (Boolean.class.equals(required)) {
+            return "a boolean";
+        }
+        return "a " + required.getSimpleName();
     }
 
     private static String lastNode(ConstraintViolation<?> violation) {

@@ -46,8 +46,8 @@ public class CartService {
                 .orElseThrow(() -> new BadRequestException(
                         "Product with id " + request.productId() + " does not exist"));
 
-        Cart cart = cartRepository.findByCustomerId(customerId)
-                .orElseGet(() -> new Cart(customerId, LocalDateTime.now()));
+        Cart cart = cartRepository.findByCustomerIdForUpdate(customerId)
+                .orElseGet(() -> cartRepository.save(new Cart(customerId, LocalDateTime.now())));
 
         Optional<CartItem> existingLine = findLine(cart, product.getId());
         if (existingLine.isPresent()) {
@@ -63,8 +63,7 @@ public class CartService {
 
     @Transactional
     public CartResponse updateItemQuantity(String customerId, Long productId, int quantity) {
-        Cart cart = cartRepository.findByCustomerId(customerId)
-                .orElseThrow(() -> new NotFoundException("Cart of customer " + customerId + " does not exist"));
+        Cart cart = lockCart(customerId);
         CartItem line = findLine(cart, productId)
                 .orElseThrow(() -> new NotFoundException(
                         "Product " + productId + " is not in the cart of customer " + customerId));
@@ -76,8 +75,7 @@ public class CartService {
 
     @Transactional
     public void removeItem(String customerId, Long productId) {
-        Cart cart = cartRepository.findByCustomerId(customerId)
-                .orElseThrow(() -> new NotFoundException("Cart of customer " + customerId + " does not exist"));
+        Cart cart = lockCart(customerId);
         CartItem line = findLine(cart, productId)
                 .orElseThrow(() -> new NotFoundException(
                         "Product " + productId + " is not in the cart of customer " + customerId));
@@ -89,8 +87,7 @@ public class CartService {
 
     @Transactional
     public void clear(String customerId) {
-        Cart cart = cartRepository.findByCustomerId(customerId)
-                .orElseThrow(() -> new NotFoundException("Cart of customer " + customerId + " does not exist"));
+        Cart cart = lockCart(customerId);
         if (cart.getItems().isEmpty()) {
             throw new NotFoundException("Cart of customer " + customerId + " is already empty");
         }
@@ -102,13 +99,11 @@ public class CartService {
 
     @Transactional
     public OrderResponse checkout(String customerId) {
-        Cart cart = cartRepository.findByCustomerId(customerId)
-                .orElseThrow(() -> new NotFoundException("Cart of customer " + customerId + " does not exist"));
+        Cart cart = lockCart(customerId);
         if (cart.getItems().isEmpty()) {
             throw new BadRequestException("Cart of customer " + customerId + " is empty");
         }
 
-        // Pass 1 , validate the whole cart before creating anything, so a rejected checkout
         List<CartItem> lines = new ArrayList<>(cart.getItems());
         for (CartItem line : lines) {
             Product product = line.getProduct();
@@ -117,7 +112,6 @@ public class CartService {
             }
         }
 
-        // Pass 2 , build the order and freeze the current price of every line.
         Order order = new Order(LocalDateTime.now(), Order.Status.PENDING_PAYMENT);
         for (CartItem line : lines) {
             Product product = line.getProduct();
@@ -130,6 +124,11 @@ public class CartService {
         cartRepository.save(cart);
 
         return OrderResponse.from(saved);
+    }
+
+    private Cart lockCart(String customerId) {
+        return cartRepository.findByCustomerIdForUpdate(customerId)
+                .orElseThrow(() -> new NotFoundException("Cart of customer " + customerId + " does not exist"));
     }
 
     private static Optional<CartItem> findLine(Cart cart, Long productId) {
