@@ -39,14 +39,20 @@ public class OrderService {
 
     @Transactional
     public OrderResponse pay(Long id) {
-        Order order = orderRepository.findById(id).orElse(null);
-        if (order == null) {
-            return null;
-        }
-        if (order.getStatus() != Order.Status.PENDING_PAYMENT) {
+        LocalDateTime paidAt = LocalDateTime.now();
+
+        int claimed = orderRepository.claimForPayment(id, paidAt, Order.Status.PAID,
+                Order.Status.PENDING_PAYMENT);
+        if (claimed == 0) {
+            Order existing = orderRepository.findById(id).orElse(null);
+            if (existing == null) {
+                return null;
+            }
             throw new ConflictException(
-                    "Order " + id + " is " + order.getStatus() + " and can no longer be paid");
+                    "Order " + id + " is " + existing.getStatus() + " and can no longer be paid");
         }
+
+        Order order = orderRepository.findById(id).orElseThrow();
 
         List<OrderItem> items = new ArrayList<>(order.getItems());
         items.sort(Comparator.comparing(item -> item.getProduct().getId()));
@@ -60,10 +66,7 @@ public class OrderService {
             }
         }
 
-        order.setStatus(Order.Status.PAID);
-        order.setPaidAt(LocalDateTime.now());
-
-        return OrderResponse.from(orderRepository.save(order));
+        return OrderResponse.from(order);
     }
 
     @Transactional
