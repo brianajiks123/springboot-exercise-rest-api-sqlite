@@ -18,7 +18,8 @@ and removes the possibility of overselling under concurrency.
   This is the only operation in the API that reduces stock because of a sale.
 - **No overselling, by construction.** The availability check and the subtraction are a single
   conditional `UPDATE ... WHERE stock >= :quantity`, so the database arbitrates concurrent
-  payments instead of the application.
+  payments instead of the application. The status transition is claimed the same way
+  (`UPDATE ... WHERE status = 'PENDING_PAYMENT'`), so one order can only ever be settled once.
 - **Nothing ever adds stock back.** A cart reserves nothing, cancelling an unpaid order changes no
   stock, and a paid order is terminal , so the same units can never be counted twice.
 - **Two-phase checkout:** the whole cart is validated before anything is created, so a rejected
@@ -34,8 +35,8 @@ and removes the possibility of overselling under concurrency.
 - Decimal money handling: `BigDecimal` / `NUMERIC(19,2)`, never `double`.
 - Automatic API documentation via **Swagger UI / OpenAPI 3**.
 - File-based H2 database (no separate DB server) , `demo1db.mv.db`.
-- 81 automated tests: a context smoke test, cart and payment service suites (including a
-  concurrency test), an HTTP contract suite, and an end-to-end suite that drives a real running
+- 82 automated tests: a context smoke test, cart and payment service suites (including two
+  concurrency tests), an HTTP contract suite, and an end-to-end suite that drives a real running
   instance over HTTP against a file-backed database.
 
 ## Tech Stack
@@ -280,9 +281,11 @@ Response `200 OK`: the same order with `"status": "PAID"` and a non-null `paidAt
 ordered products is reduced as part of the same request.
 
 > **Concurrency:** paying is a single conditional `UPDATE` per product. If two cashiers pay for the
-> last unit at the same time, one succeeds and the other gets `409 Conflict`. An order can never be
-> half-settled: if one product runs out, every decrement in that request is rolled back and the
-> order stays `PENDING_PAYMENT`.
+> last unit at the same time, one succeeds and the other gets `409 Conflict`. The order itself is
+> claimed first, with a conditional `UPDATE ... WHERE status = 'PENDING_PAYMENT'`, so the same order
+> cannot be settled twice even when several cashiers reach `pay` simultaneously. An order can never be
+> half-settled: if one product runs out, every decrement in that request is rolled back, along with the
+> claim, and the order stays `PENDING_PAYMENT`.
 
 ## Error Handling
 
@@ -369,7 +372,7 @@ demo1/
         │   │   └── ApiContractTest.java          # 35 MockMvc tests locking status codes & messages
         │   ├── service/
         │   │   ├── CartServiceTest.java          # 21 tests: cart behaviour & checkout
-        │   │   └── OrderPaymentFlowTest.java     # 15 tests: payment, rollback, concurrency
+        │   │   └── OrderPaymentFlowTest.java     # 16 tests: payment, rollback, concurrency
         │   └── e2e/
         │       └── CashierFlowEndToEndTest.java  # 9 tests over real HTTP on a file-backed H2
         └── resources/
@@ -414,13 +417,13 @@ demo1/
 ./mvnw test
 ```
 
-The suite has **81 tests** across five classes:
+The suite has **82 tests** across five classes:
 
 | Class | Tests | Scope |
 | --- | --- | --- |
 | `Demo1ApplicationTests` | 1 | Spring context loads |
 | `CartServiceTest` | 21 | Cart accumulation, quantity updates, removal, checkout, and that the cart never touches stock |
-| `OrderPaymentFlowTest` | 15 | Payment, rollback, `cancel`/`delete` guards, the `10-7-10-13` regression, and concurrent payments |
+| `OrderPaymentFlowTest` | 16 | Payment, rollback, `cancel`/`delete` guards, the `10-7-10-13` regression, and two concurrency races: many orders competing for one unit, and many cashiers competing for one order |
 | `ApiContractTest` | 35 | HTTP contract: status codes and error messages via MockMvc |
 | `CashierFlowEndToEndTest` | 9 | The whole flow over real HTTP against a file-backed database (see below) |
 
@@ -548,7 +551,9 @@ units. There is no "restore" step left, so that can no longer happen.
    Boot's default JSON for validation errors) , see [Error Handling](#error-handling).
 8. **`Order`, `OrderItem`, `Cart` and `CartItem` have no `@Version`**, so concurrent
    modifications to those rows are not protected by optimistic locking (only `Product` is).
-   In practice the order lifecycle is guarded by explicit status checks instead.
+   Payment does not depend on it: the order is claimed with a conditional `UPDATE` on its status.
+   `cancel` and `deleteById` still check the status in Java before writing, so a `cancel` or a
+   `delete` racing against a `pay` on the same order can still lose the update.
 9. **No unique constraint on `products.name`**, so duplicate product names are allowed.
 10. **No explicit index on `order_items.product_id` or `cart_items.product_id`.** The unique
     constraints are `(order_id, product_id)` and `(cart_id, product_id)`, which cannot serve

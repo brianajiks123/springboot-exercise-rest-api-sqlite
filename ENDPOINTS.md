@@ -297,6 +297,12 @@ reduces stock because of a sale.
 > **Two cashiers cannot oversell the last unit.** The availability check and the subtraction
 > are a single SQL statement, so the database arbitrates; the loser gets `409`. A
 > read-then-write implementation could not give this guarantee.
+>
+> **The same order cannot be paid twice.** Claiming the order is itself a single conditional
+> `UPDATE ... WHERE id = ? AND status = 'PENDING_PAYMENT'`, so a second cashier working on the same
+> order matches nothing, gets `409`, and never reaches the stock. The order is claimed *before* the
+> stock is deducted, which is what lets the two guarantees hold together: a loser leaves the order,
+> and the stock, exactly as they were.
 
 ### `POST /api/orders/{id}/cancel`
 

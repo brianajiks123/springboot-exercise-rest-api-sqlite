@@ -317,14 +317,18 @@ The application maps that to `409 Conflict` with the message
 
 **Key idea:** the client is expected to *retry*, not to be blocked. `Product` has `@Version`;
 `Order`, `OrderItem`, `Cart` and `CartItem` do not, so concurrent edits to those rows are not protected
-by optimistic locking. The order lifecycle is guarded by explicit status checks instead.
+by optimistic locking. Where a transition must not be lost, the code does not lean on optimistic
+locking at all: it makes the transition itself conditional. Payment claims the order with
+`UPDATE ... WHERE id = ? AND status = 'PENDING_PAYMENT'` rather than checking the status in Java first.
 
 > **Here, `@Version` is not the main defence against overselling.** The payment path uses a single
 > conditional `UPDATE` (`... WHERE id = ? AND stock >= ?`), which *prevents* the lost update rather than
-> detecting it afterwards , see [Stock semantics](ENDPOINTS.md#stock-semantics). Optimistic locking still
-> protects the plain read-modify-write in `PUT /api/products/{id}`, and the payment's decrement bumps
-> `version` by hand, so a concurrent `PUT` fails its version check instead of silently overwriting a
-> settled sale.
+> detecting it afterwards , see [Stock semantics](ENDPOINTS.md#stock-semantics). The same trick guards the
+> status: claiming an order for payment is one conditional
+> `UPDATE ... WHERE id = ? AND status = 'PENDING_PAYMENT'`, so two cashiers cannot both settle the same
+> order. Optimistic locking still protects the plain read-modify-write in `PUT /api/products/{id}`, and
+> the payment's decrement bumps `version` by hand, so a concurrent `PUT` fails its version check instead
+> of silently overwriting a settled sale.
 
 ---
 
@@ -511,16 +515,20 @@ OrderController        path variable only, no request body
         │
         ▼
 OrderService.pay()     @Transactional
-        ├── status must be PENDING_PAYMENT, else ConflictException (409)
+        ├── claim: UPDATE orders SET status = PAID, paid_at = now
+        │          WHERE id = ? AND status = PENDING_PAYMENT
+        │          → 0 rows: not awaiting payment, or another cashier claimed it
+        │            first → ConflictException (409), and no stock is touched
+        ├── reload the order (now PAID) for the response
         ├── sort the items by productId (fixed lock order, no deadlock)
         ├── per item: UPDATE products SET stock = stock - qty, version = version + 1
         │             WHERE id = ? AND stock >= qty
         │             → 0 rows updated: ConflictException (409) and the whole
         │               transaction rolls back, so nothing is half-settled
-        └── set status = PAID, paidAt = now
+        └── the claim rolls back with it: the order stays PENDING_PAYMENT
         │
         ▼
-Hibernate              one conditional UPDATE per product, then UPDATE orders
+Hibernate              a conditional UPDATE on orders, then one per product
         │
         ▼
 GlobalExceptionHandler maps the exception to 400 / 409 and writes the body

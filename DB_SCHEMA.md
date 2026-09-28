@@ -291,6 +291,12 @@ several threads, and
 `CashierFlowEndToEndTest.simultaneousCashiers_overRealHttp_onlyOneWinsTheLastUnit()` sends five
 genuinely parallel HTTP requests to a running server.
 
+The order's own status transition is claimed the same way, with a single conditional `UPDATE` on
+`orders.status` (`... WHERE id = ? AND status = 'PENDING_PAYMENT'`) issued *before* any stock is
+deducted. `OrderPaymentFlowTest.concurrentPaymentsOfTheSameOrder_deductStockExactlyOnce()` runs six
+cashiers against one order and asserts that exactly one of them wins and that a one-unit order removes
+exactly one unit from stock.
+
 Two further details matter:
 
 - **`version` is bumped by hand.** Without it a concurrent `PUT /api/products/{id}` , a
