@@ -10,7 +10,6 @@ import com.example.demo1.repository.ProductRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
@@ -21,27 +20,13 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * Covers the "pay at the cashier" lifecycle of an order.
- *
- * <p>Deliberately NOT annotated with {@code @Transactional}: each service call must run in its
- * own transaction, so rollback behaviour is genuinely exercised. That matters most in
- * {@link #pay_multiProductOrder_rollsBackEveryDecrementWhenOneProductRunsOut()} and in the
- * concurrency test, which would be meaningless inside one shared test transaction.
- *
- * <p>Two of these tests are direct regressions for the design that was replaced:
- * {@link #cancel_unpaidOrder_doesNotTouchStock()} and
- * {@link #putStockWhileAnOrderIsUnpaid_noLongerInflatesStock()}.
- */
 @SpringBootTest
 class OrderPaymentFlowTest {
-
     @Autowired
     private OrderService orderService;
 
@@ -63,7 +48,6 @@ class OrderPaymentFlowTest {
         return productRepository.findById(productId).orElseThrow().getStock();
     }
 
-    /** Walks the real path , cart, checkout , so the order is exactly what a buyer would get. */
     private OrderResponse orderAwaitingPayment(Product product, int quantity) {
         String customer = newCustomer();
         cartService.addItem(customer, new CartItemRequest(product.getId(), quantity));
@@ -108,7 +92,6 @@ class OrderPaymentFlowTest {
         Product product = givenProduct("Scarce", 10.0, 2);
         OrderResponse order = orderAwaitingPayment(product, 2);
 
-        // Another buyer takes the remaining units before this one reaches the cashier.
         product.setStock(0);
         productRepository.save(product);
 
@@ -129,7 +112,6 @@ class OrderPaymentFlowTest {
         cartService.addItem(customer, new CartItemRequest(soldOut.getId(), 5));
         OrderResponse order = cartService.checkout(customer);
 
-        // The second product disappears from the shelf while the order waits in the queue.
         soldOut.setStock(0);
         productRepository.save(soldOut);
 
@@ -226,14 +208,6 @@ class OrderPaymentFlowTest {
 
     // ------------------------------------------------------------- regression
 
-    /**
-     * The exact sequence that used to produce {@code 10 -> 7 -> 10 -> 13}.
-     *
-     * <p>Under the old design the PUT wrote off the order's reservation, and then the
-     * order's cancellation added the reservation back on top of the overwritten value,
-     * inventing three units. In the current model nothing is ever added back, so the stock
-     * can only ever be the physical count minus what has actually been sold.
-     */
     @Test
     void putStockWhileAnOrderIsUnpaid_noLongerInflatesStock() {
         Product product = givenProduct("Laptop", 1000.0, 10);
@@ -260,23 +234,6 @@ class OrderPaymentFlowTest {
 
     // ------------------------------------------------------------ concurrency
 
-    /**
-     * The race the whole redesign exists for: several buyers reach the cashier at the same
-     * instant for the last unit in stock.
-     *
-     * <p>Every order is created through a real checkout while stock is still 1, so all six are
-     * legitimately valid at that moment. Exactly one payment may win; the rest must be refused
-     * with {@code 409} and the stock must land on 0, never below.
-     *
-     * <p>The payment relies on a single conditional UPDATE
-     * ({@code ... WHERE id = ? AND stock >= ?}), so the database arbitrates. The test would fail
-     * under a read-then-write implementation, where two threads can both read {@code 1} and both
-     * write {@code 0}.
-     *
-     * <p>Only {@link ConflictException} is treated as a legitimate loss. Anything else (for
-     * example a lock timeout) is allowed to propagate so the test fails loudly instead of
-     * silently counting it as a correct rejection.
-     */
     @Test
     void concurrentPayments_cannotOversellTheLastUnit() throws Exception {
         Product product = givenProduct("Last unit", 100.0, 1);
@@ -323,19 +280,6 @@ class OrderPaymentFlowTest {
         }
     }
 
-    /**
-     * The mirror image of the test above: instead of many orders competing for one unit, many
-     * cashiers compete for the <em>same</em> order.
-     *
-     * <p>A read-then-write status check is not enough here. Two threads can both read
-     * {@code PENDING_PAYMENT}, both pass the check, and both deduct stock, so a one-unit order
-     * would take several units off the shelf while the sales record shows only one. The claim is
-     * therefore a single conditional UPDATE on the status
-     * ({@code ... WHERE id = ? AND status = ?}), and only the thread that wins it goes on to
-     * touch stock. This test fails against the earlier implementation, which deducted 4-5 units.
-     *
-     * <p>Only {@link ConflictException} is treated as a legitimate loss, as above.
-     */
     @Test
     void concurrentPaymentsOfTheSameOrder_deductStockExactlyOnce() throws Exception {
         Product product = givenProduct("One order", 100.0, 100);
@@ -377,18 +321,6 @@ class OrderPaymentFlowTest {
         }
     }
 
-    /**
-     * Payment is not the only way an order can leave {@code PENDING_PAYMENT}. Cancelling and
-     * deleting also read the status before writing, so both can lose an update to a payment that
-     * commits in between: the order would end up {@code CANCELLED} (or gone) while the stock had
-     * already been deducted, which is exactly the disagreement between the shelf and the sales
-     * record the whole design tries to prevent.
-     *
-     * <p>Both operations are now atomic: cancelling is a conditional {@code UPDATE} like the
-     * payment claim, and deleting takes the order's row lock first. This test drives the two
-     * against each other repeatedly and asserts the only two acceptable outcomes: the order is
-     * {@code PAID} and took one unit, or it was abandoned and took nothing.
-     */
     @Test
     void payingAndCancellingTheSameOrderAtOnce_neverCancelsAnOrderThatTookStock() throws Exception {
         for (int round = 0; round < 8; round++) {
@@ -425,7 +357,6 @@ class OrderPaymentFlowTest {
         }
     }
 
-    /** The same race against {@code DELETE}, which must not erase a sale that already happened. */
     @Test
     void payingAndDeletingTheSameOrderAtOnce_neverDeductsStockForAnOrderThatIsGone() throws Exception {
         for (int round = 0; round < 8; round++) {
