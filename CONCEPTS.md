@@ -49,8 +49,9 @@ H2 database
 | `dto/` | API input/output shape + validation | contain persistence annotations |
 
 The controller returns `ResponseEntity` and picks the status code; the service returns DTOs and throws
-domain exceptions (`IllegalArgumentException`, `ConflictException`). The translation from exception to
-HTTP status happens in one central place , see [Exception handling](#exception-handling-restcontrolleradvice).
+domain exceptions (`BadRequestException`, `ConflictException`, `NotFoundException`). The translation
+from exception to HTTP status happens in one central place , see
+[Exception handling](#exception-handling-restcontrolleradvice).
 
 ---
 
@@ -193,11 +194,18 @@ A **dialect** tells Hibernate which SQL variant to generate. Hibernate writes di
 
 H2 is supported by Hibernate **natively**: `org.hibernate.dialect.H2Dialect` ships inside `hibernate-core`, so no extra dependency is needed (unlike the SQLite dialect, which had to be pulled in from `hibernate-community-dialects`).
 
+**This project does not declare the dialect at all.** Hibernate inspects the JDBC connection and
+selects `H2Dialect` on its own, so `spring.jpa.database-platform` is absent from
+`application.properties`. Setting it by hand would only add a line that can drift out of date , and
+it makes Hibernate log `HHH90000025` ("dialect was explicitly set, so automatic detection is
+skipped"), which is a fair warning: you have overridden something that would have been correct.
+
 ```properties
-spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
+# not present in this project , the dialect is detected from the JDBC connection
+# spring.jpa.database-platform=org.hibernate.dialect.H2Dialect
 ```
 
-**Key idea:** without a dialect, Hibernate would generate MySQL/PostgreSQL-style SQL that H2 would reject.
+**Key idea:** without a dialect, Hibernate would generate MySQL/PostgreSQL-style SQL that H2 would reject. Letting it detect the dialect is what makes the same code portable.
 
 **Related dependency:** `spring-boot-starter-data-jpa` (bundles `hibernate-core`, which contains the H2 dialect).
 
@@ -230,7 +238,9 @@ public ResponseEntity<ProductResponse> createProduct(@Valid @RequestBody Product
 }
 ```
 
-If validation fails, Spring returns `400 Bad Request` automatically , you write no error-handling code.
+If validation fails, Spring rejects the request with `400 Bad Request` automatically , you write no
+error-handling code. `GlobalExceptionHandler` then renders that failure in the same envelope as every
+other error, with the offending fields listed under `fieldErrors`.
 
 **Key idea:** bean validation guards the *shape* of the input (required fields, ranges, lengths). It cannot
 express rules that depend on other data , "is there enough stock?", "does this product exist?". Those are
@@ -416,9 +426,10 @@ which HTTP status each exception maps to. Spring lets you declare that once:
 ```java
 @RestControllerAdvice
 public class GlobalExceptionHandler {
-    @ExceptionHandler(IllegalArgumentException.class)
-    public ResponseEntity<String> handleIllegalArgument(IllegalArgumentException ex) {
-        return ResponseEntity.badRequest().body(ex.getMessage());
+    @ExceptionHandler(BadRequestException.class)
+    public ResponseEntity<ApiErrorResponse> handleBadRequest(BadRequestException ex,
+            HttpServletRequest request) {
+        return error(HttpStatus.BAD_REQUEST, ex.getMessage(), request, null);
     }
 }
 ```
@@ -428,19 +439,39 @@ translates them.
 
 | Exception | HTTP status |
 | --- | --- |
-| `IllegalArgumentException` | `400 Bad Request` |
+| `BadRequestException` | `400 Bad Request` |
+| `NotFoundException` | `404 Not Found` |
 | `ConflictException` | `409 Conflict` |
 | `OptimisticLockingFailureException` | `409 Conflict` |
 | `DataIntegrityViolationException` | `409 Conflict` (safety net) |
 
-`ConflictException` is a tiny custom `RuntimeException`: the request is well-formed, but it clashes with
-the current state of the data (deleting a product that orders still reference).
+The three custom exceptions are tiny `RuntimeException`s that differ only in meaning: the request
+itself is wrong (`BadRequestException`), the thing being addressed does not exist
+(`NotFoundException`), or the request clashes with the current state of the data
+(`ConflictException` , e.g. deleting a product that orders still reference). Splitting them is what
+lets one advice method map each to the right status without ever inspecting a message.
 
-> **Two gaps worth knowing.** (1) `DataIntegrityViolationException` is a *safety net* , if it fires, the
-> message is generic because the real cause is a database constraint. (2) Bean Validation failures are
-> **not** routed through this advice (`MethodArgumentNotValidException` is left to Spring Boot's default
-> handling), so validation errors come back as Spring's error JSON while business errors come back as
-> plain text.
+### One envelope, and why `null` is not a control-flow value
+
+Every handler returns the same `ApiErrorResponse` body, so a client parses one shape no matter what
+failed. Two consequences are worth calling out:
+
+- **"Not found" is thrown, not returned.** It is tempting to write
+  `ResponseEntity.ofNullable(service.findById(id))`, which produces a `404` with an *empty* body.
+  Instead the service throws `NotFoundException` and the controller simply returns the DTO, so a
+  missing resource carries a message like `Order 999 does not exist`. Returning `null` also forces
+  every caller to remember a null check; an exception cannot be forgotten.
+- **Framework errors are folded in.** `NoResourceFoundException`, `NoHandlerFoundException` and
+  `HttpRequestMethodNotSupportedException` all implement `ErrorResponse`, but that is an interface
+  describing a *response*, not a throwable, so it cannot be an `@ExceptionHandler` parameter. The
+  catch-all `Exception` handler checks `instanceof ErrorResponse` and reuses Spring's status and
+  detail, which is why a typo in a URL looks like every other error instead of Boot's default page.
+
+> **Two things worth knowing.** (1) `DataIntegrityViolationException` is a *safety net* , if it fires,
+> the message is generic because the real cause is a database constraint. (2) Bean Validation failures
+> now reach the advice , as `MethodArgumentNotValidException` for a request body and as
+> `HandlerMethodValidationException` for path variables , and come back with `fieldErrors` filled in
+> instead of as Spring Boot's default error document.
 
 ---
 
@@ -497,8 +528,9 @@ CartController         path variable only, no request body
         │
         ▼
 CartService.checkout() @Transactional
+        ├── no cart for this customer? → NotFoundException (404)
         ├── pass 1: cart empty? every product still in stock?
-        │           → on failure: throw IllegalArgumentException (400)
+        │           → on failure: throw BadRequestException (400)
         ├── pass 2: snapshot each price, build the order, save it,
         │           then empty the cart
         │           → stock is NOT touched here
@@ -547,7 +579,7 @@ GlobalExceptionHandler maps the exception to 400 / 409 and writes the body
 - **`@Version`** , optimistic locking against lost updates.
 - **`BigDecimal`** , exact money arithmetic.
 - **`@EntityGraph`** , one query instead of N+1.
-- **`@RestControllerAdvice`** , one place that maps exceptions to HTTP.
+- **`@RestControllerAdvice`** , one place that maps every exception to the same error body.
 - **JAR** , how everything ships as one runnable file.
 - **MVC** , the pattern that keeps Controller, Model (Service/Entity), and View (JSON) separated.
 

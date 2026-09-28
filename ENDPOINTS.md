@@ -9,9 +9,10 @@ Base URL: `http://localhost:8080` (or whatever host/port the app is running on).
 - Timestamps are serialized as ISO-8601 `LocalDateTime` (e.g. `2026-09-23T08:49:45`), stored in UTC
   (`spring.jpa.properties.hibernate.jdbc.time_zone=UTC`).
 - Monetary values are decimals (`BigDecimal`), never binary floats. At most 2 decimal places.
-- **Success bodies are JSON. Error bodies are plain text** for exceptions raised by the service layer
-  (see [Error responses](#5-error-responses)). Bean Validation failures instead return Spring Boot's
-  default error JSON, so the two shapes differ.
+- **Success bodies are JSON, and so are error bodies.** Every failure , service exception,
+  Bean Validation, malformed JSON, unmapped path or wrong method , is rendered by
+  `GlobalExceptionHandler` as the same `ApiErrorResponse` object, so a client only ever has to
+  parse one shape. See [Error responses](#6-error-responses).
 
 ## The flow in one picture
 
@@ -69,7 +70,7 @@ Creates a new product.
 
 - **Request Body (JSON):**
   - `name`: string (required, max 255 chars)
-  - `description`: string (optional, max 2000 chars in the DTO , see the note below)
+  - `description`: string (optional, max 255 chars , same limit as the column)
   - `price`: number (required, non-negative, at most 2 decimals)
   - `stock`: integer (required, non-negative)
 - **Success Response:** `201 Created`
@@ -84,10 +85,9 @@ Creates a new product.
 }
 ```
 
-> **`description` caveat:** the DTO accepts up to 2000 chars but the `description`
-> column is `VARCHAR(255)`. A longer value passes validation and then fails at
-> flush time. This mismatch was consciously left in the code, so **keep
-> descriptions under 255 chars**.
+> **`description` is capped at 255 chars in both places.** The DTO's `@Size(max = 255)` matches
+> the `varchar(255)` column exactly, so an over-long description is rejected with `400` and a
+> `fieldErrors` entry instead of passing validation and then failing at flush time.
 
 ### `PUT /api/products/{id}`
 
@@ -130,6 +130,11 @@ There is no authentication yet, so a cart is addressed by a client-supplied
 `customerId` string in the path, for example `/api/carts/budi`. Anyone who knows the id
 can read and change that cart; that is an accepted limitation of this exercise, not a
 security boundary.
+
+> **`customerId` is validated on every cart endpoint.** It must be 1–64 characters drawn from
+> `[A-Za-z0-9._-]`. A value that breaks either rule is rejected with `400 Bad Request` before the
+> service is reached, so it can never reach `carts.customer_id`. A URL-encoded space, slash or
+> accented character therefore fails fast instead of creating a junk row.
 
 **No endpoint in this section changes `products.stock`.**
 
@@ -223,7 +228,7 @@ Turns the cart into an order awaiting payment, and empties the cart.
 }
 ```
 
-| Condition | Status | Body |
+| Condition | Status | `message` |
 | --- | --- | --- |
 | Cart is empty | `400` | `Cart of customer <customerId> is empty` |
 | Not enough stock | `400` | `Insufficient stock for product: <name>` |
@@ -276,7 +281,7 @@ Retrieves a single order by its ID.
   - `404 Not Found` (if ID does not exist)
   - `409 Conflict` (if the order is not awaiting payment, or a product ran out of stock)
 
-| Condition | Status | Body |
+| Condition | Status | `message` |
 | --- | --- | --- |
 | Order already `PAID` | `409` | `Order <id> is PAID and can no longer be paid` |
 | Order `CANCELLED` | `409` | `Order <id> is CANCELLED and can no longer be paid` |
@@ -346,36 +351,93 @@ Deletes an order by its ID. This also cascades to its order items.
 
 ---
 
-## 5. Error responses
+## 5. Health endpoint
 
-### Service-layer exceptions
+`GET /actuator/health` answers `200 OK` with `{"status":"UP"}` while the application and its
+datasource are usable, and `503` when a health indicator reports `DOWN`. It is the only actuator
+endpoint exposed (`management.endpoints.web.exposure.include=health`); every other actuator path
+returns `404`.
 
-Handled by `GlobalExceptionHandler` (`@RestControllerAdvice`). The body is the raw
-message as **plain text** (`text/plain`), not JSON.
+---
 
-| Exception | Status | Body |
-| --- | --- | --- |
-| `IllegalArgumentException` | `400 Bad Request` | The exception message |
-| `ConflictException` | `409 Conflict` | The exception message |
-| `OptimisticLockingFailureException` | `409 Conflict` | `The product was modified by another request. Please retry.` |
-| `DataIntegrityViolationException` | `409 Conflict` | `The request conflicts with the current state of the data.` |
+## 6. Error responses
 
-### Bean Validation failures
+### One envelope for everything
 
-`MethodArgumentNotValidException` is **not** handled by `GlobalExceptionHandler`, so
-validation errors return Spring Boot's default error document (JSON), e.g.:
+`GlobalExceptionHandler` (`@RestControllerAdvice`) renders every failure as `ApiErrorResponse`,
+whatever raised it , a service exception, Bean Validation, an unreadable body, an unmapped path,
+or an unexpected bug:
 
 ```json
 {
-  "timestamp": "2026-09-23T08:49:45.123Z",
-  "status": 400,
-  "error": "Bad Request",
-  "path": "/api/products"
+  "timestamp": "2026-09-23T10:20:41.512",
+  "status": 409,
+  "error": "Conflict",
+  "message": "Order 3 is PAID and can no longer be paid",
+  "path": "/api/orders/3/pay",
+  "fieldErrors": null
 }
 ```
 
-Clients must therefore tolerate two different error shapes: plain text for
-business-rule violations, JSON for validation failures.
+| Field | Meaning |
+| --- | --- |
+| `timestamp` | When the error was produced (ISO-8601 `LocalDateTime`) |
+| `status` | HTTP status code, repeated in the body |
+| `error` | HTTP reason phrase, e.g. `Conflict` |
+| `message` | Human-readable explanation. Safe to show to a user |
+| `path` | The requested path, without query string |
+| `fieldErrors` | Field name → validation message. **`null`** unless a request failed validation |
+
+### What produces which status
+
+| Cause | Status | `message` |
+| --- | --- | --- |
+| `BadRequestException` , a business rule on the request (unknown product, empty cart, not enough stock at checkout) | `400` | The exception message |
+| `ConflictException` , the request clashes with the current state | `409` | The exception message |
+| `NotFoundException` , the addressed resource does not exist | `404` | The exception message, e.g. `Order 999 does not exist` |
+| `MethodArgumentNotValidException` , invalid request body | `400` | `Request validation failed` + `fieldErrors` |
+| `HandlerMethodValidationException` / `ConstraintViolationException` , invalid path variable | `400` | `Request validation failed` + `fieldErrors` |
+| `HttpMessageNotReadableException` , missing or malformed JSON | `400` | `Request body is missing or malformed` |
+| `OptimisticLockingFailureException` | `409` | `The product was modified by another request. Please retry.` |
+| `DataIntegrityViolationException` (safety net) | `409` | `The request conflicts with the current state of the data.` |
+| Spring's own `ErrorResponse` , unmapped path, unsupported method | `404` / `405` | Spring's detail, or its title |
+| Anything else | `500` | `Unexpected server error` |
+
+A validation failure, with `fieldErrors` populated:
+
+```json
+{
+  "timestamp": "2026-09-23T10:19:02.144",
+  "status": 400,
+  "error": "Bad Request",
+  "message": "Request validation failed",
+  "path": "/api/products",
+  "fieldErrors": { "name": "Name must not be blank", "price": "Price is required" }
+}
+```
+
+An unmapped path uses the same envelope , `POST /api/orders` is the built-in example, because
+that endpoint deliberately does not exist:
+
+```json
+{
+  "timestamp": "2026-09-23T10:21:55.006",
+  "status": 405,
+  "error": "Method Not Allowed",
+  "message": "Method 'POST' is not supported.",
+  "path": "/api/orders",
+  "fieldErrors": null
+}
+```
+
+> **`500` never leaks internals.** The catch-all handler logs the real exception with its stack
+> trace and returns a fixed message, so a database or null-pointer error cannot expose a stack
+> trace or a SQL fragment to the client.
+>
+> **Every `404` in this document carries that body.** "Not found" is signalled by the service
+> throwing `NotFoundException`, not by a controller returning an empty `404`, so all eleven
+> not-found paths include a `message` naming what was missing. A `404` with no body would mean the
+> envelope has been bypassed somewhere.
 
 ### Status code summary
 
@@ -388,6 +450,7 @@ business-rule violations, JSON for validation failures.
 | `404` | Resource does not exist (product, order, cart, or cart line) |
 | `405` | `POST /api/orders` , orders are created by a cart checkout |
 | `409` | State conflict: insufficient stock at payment, wrong order status, product still referenced, concurrent modification, constraint violation |
+| `500` | An unexpected failure; the body says only `Unexpected server error` |
 
 ---
 

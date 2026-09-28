@@ -30,12 +30,18 @@ and removes the possibility of overselling under concurrency.
   and their products in a single query.
 - Layered architecture: `Controller → Service → Repository`, with **DTOs** separated from the entity
   (the API does not expose the table structure).
-- Request-body validation via Jakarta Bean Validation.
-- Central exception-to-HTTP mapping in `@RestControllerAdvice` (`GlobalExceptionHandler`).
+- Request-body **and path-variable** validation via Jakarta Bean Validation. `customerId` is
+  length-capped and character-restricted, so a malformed cart URL is rejected before it can create
+  a row.
+- Central exception-to-HTTP mapping in `@RestControllerAdvice` (`GlobalExceptionHandler`), which
+  renders **one error envelope for every failure**: service exceptions, Bean Validation failures,
+  malformed JSON, and Spring's own `404`/`405` all come back as the same `ApiErrorResponse` JSON.
+- `GET /actuator/health` as a readiness probe. Actuator is on the classpath for that one endpoint
+  and nothing else is exposed.
 - Decimal money handling: `BigDecimal` / `NUMERIC(19,2)`, never `double`.
 - Automatic API documentation via **Swagger UI / OpenAPI 3**.
 - File-based H2 database (no separate DB server) , `demo1db.mv.db`.
-- 84 automated tests: a context smoke test, cart and payment service suites (including four
+- 91 automated tests: a context smoke test, cart and payment service suites (including four
   concurrency tests), an HTTP contract suite, and an end-to-end suite that drives a real running
   instance over HTTP against a file-backed database.
 
@@ -47,6 +53,7 @@ and removes the possibility of overselling under concurrency.
 | Spring Boot | 4.1.1 |
 | Spring Data JPA (Hibernate) | via `spring-boot-starter-data-jpa` |
 | Database | H2 (file-based, version managed by the Spring Boot parent) |
+| Health endpoint | `spring-boot-starter-actuator` , only `/actuator/health` is exposed |
 | API docs | springdoc-openapi 3.1.0 |
 | Testing | JUnit 5 + MockMvc + `RestTestClient` (`spring-boot-starter-webmvc-test`) |
 | Build | Maven (wrapper `mvnw` / `mvnw.cmd`) |
@@ -219,7 +226,7 @@ Response `201 Created`:
 }
 ```
 
-> **Validation:** `name` is required (max 255 chars), `price` is required, must not be negative and accepts at most 2 decimals, `stock` is required and must not be negative. `description` is optional and the DTO allows up to 2000 chars , but see [Known limitations](#known-limitations) for the column-size mismatch. On validation failure the API returns `400 Bad Request`. Concurrent updates to the same product return `409 Conflict`.
+> **Validation:** `name` is required (max 255 chars), `price` is required, must not be negative and accepts at most 2 decimals, `stock` is required and must not be negative, and `description` is optional with a 255-character cap that matches its column exactly. On validation failure the API returns `400 Bad Request` carrying a `fieldErrors` map. Concurrent updates to the same product return `409 Conflict`.
 
 #### Add to a cart
 
@@ -289,22 +296,61 @@ ordered products is reduced as part of the same request.
 
 ## Error Handling
 
-All service-level exceptions are translated by `GlobalExceptionHandler`
-(`@RestControllerAdvice`). The bodies below are **plain text**, not JSON:
+Every failure , whatever raised it , is rendered as the same JSON body by
+`GlobalExceptionHandler` (`@RestControllerAdvice`):
 
-| Exception | Status | Response body |
+```json
+{
+  "timestamp": "2026-09-23T10:20:41.512",
+  "status": 409,
+  "error": "Conflict",
+  "message": "Order 3 is PAID and can no longer be paid",
+  "path": "/api/orders/3/pay",
+  "fieldErrors": null
+}
+```
+
+| Cause | Status | `message` |
 | --- | --- | --- |
-| `IllegalArgumentException` | `400 Bad Request` | The exception message (e.g. `Insufficient stock for product: Laptop`) |
+| `BadRequestException` (business rule) | `400 Bad Request` | The exception message (e.g. `Insufficient stock for product: Laptop`) |
 | `ConflictException` | `409 Conflict` | The exception message (e.g. `Order 3 is PAID and can no longer be paid`) |
+| `NotFoundException` | `404 Not Found` | The exception message (e.g. `Order 999 does not exist`) |
+| `MethodArgumentNotValidException` (bad body) | `400 Bad Request` | `Request validation failed`, with `fieldErrors` filled in |
+| `HandlerMethodValidationException` / `ConstraintViolationException` (bad path variable) | `400 Bad Request` | `Request validation failed`, with `fieldErrors` filled in |
+| `HttpMessageNotReadableException` | `400 Bad Request` | `Request body is missing or malformed` |
 | `OptimisticLockingFailureException` | `409 Conflict` | `The product was modified by another request. Please retry.` |
 | `DataIntegrityViolationException` | `409 Conflict` | `The request conflicts with the current state of the data.` |
+| Spring's own `ErrorResponse` (unmapped path, wrong method) | `404` / `405` | Spring's own detail, or its title |
+| Anything else | `500 Internal Server Error` | `Unexpected server error` , the real cause is logged, never returned |
 
-> **Two different 400 shapes.** Bean Validation failures are **not** handled by
-> `GlobalExceptionHandler`: `MethodArgumentNotValidException` is left to Spring
-> Boot's default error handling, so a validation error returns the standard
-> Boot error JSON (`timestamp`, `status`, `error`, `path`), while business-rule
-> errors return a plain-text message. Clients should not assume one single
-> error envelope.
+A validation failure looks like this , `fieldErrors` is populated, and is `null` on every other
+error:
+
+```json
+{
+  "timestamp": "2026-09-23T10:19:02.144",
+  "status": 400,
+  "error": "Bad Request",
+  "message": "Request validation failed",
+  "path": "/api/products",
+  "fieldErrors": { "name": "Name must not be blank" }
+}
+```
+
+> **Why the catch-all inspects `instanceof ErrorResponse`.** Spring's own 404 and 405 exceptions do
+> not share a throwable supertype this class could name, and `ErrorResponse` describes a *response*,
+> not an exception , so it cannot be an `@ExceptionHandler` parameter at all. The catch-all handler
+> therefore checks the exception at runtime and, when it is an `ErrorResponse`, reuses Spring's
+> status and detail. That is what stops a typo in a URL from escaping the envelope as Boot's default
+> error document.
+>
+> **"Not found" is a service decision, not a controller shortcut.** The services throw
+> `NotFoundException` instead of returning `null`, and the controllers no longer answer with
+> `ResponseEntity.ofNullable(...)` or `notFound().build()`. Those two idioms produce a `404` with an
+> **empty body**, which is exactly the hole this envelope is meant to close. All eleven not-found
+> paths are covered , `GET`/`PUT`/`DELETE /api/products/{id}`, `GET /api/orders/{id}`,
+> `pay`, `cancel`, `DELETE /api/orders/{id}`, and the four cart endpoints , and
+> `ApiContractTest.everyNotFoundPath_usesTheSameEnvelope` walks them one by one.
 
 ## API Documentation
 
@@ -346,15 +392,18 @@ demo1/
     │   │   │   ├── OrderRepository.java         # findAll/findById with @EntityGraph (avoids N+1)
     │   │   │   └── OrderItemRepository.java     # countByProductId , guards product deletion
     │   │   ├── model/
-    │   │   │   ├── Product.java                 # JPA entity (table `products`, @Version optimistic lock)
+    │   │   │   ├── Product.java                 # JPA entity (table `products`, @Version, stock NOT NULL)
     │   │   │   ├── Cart.java                    # JPA entity (table `carts`, unique customer_id)
-    │   │   │   ├── CartItem.java                # JPA entity (table `cart_items`, uk_cart_product)
-    │   │   │   ├── Order.java                   # JPA entity (table `orders`, PENDING_PAYMENT/PAID/CANCELLED)
-    │   │   │   └── OrderItem.java               # JPA entity (table `order_items`, uk_order_product)
+    │   │   │   ├── CartItem.java                # JPA entity (table `cart_items`, uk_cart_product + idx product_id)
+    │   │   │   ├── Order.java                   # JPA entity (table `orders`, status varchar, PENDING_PAYMENT/PAID/CANCELLED)
+    │   │   │   └── OrderItem.java               # JPA entity (table `order_items`, uk_order_product + idx product_id)
     │   │   ├── exception/
+    │   │   │   ├── BadRequestException.java     # Runtime exception → 400 Bad Request
     │   │   │   ├── ConflictException.java       # Runtime exception → 409 Conflict
-    │   │   │   └── GlobalExceptionHandler.java  # @RestControllerAdvice: service exceptions → HTTP
+    │   │   │   ├── NotFoundException.java       # Runtime exception → 404 Not Found
+    │   │   │   └── GlobalExceptionHandler.java  # @RestControllerAdvice: every failure → ApiErrorResponse
     │   │   └── dto/
+    │   │       ├── ApiErrorResponse.java        # The one error body: status, message, path, fieldErrors
     │   │       ├── ProductRequest.java          # Input payload + validation
     │   │       ├── ProductResponse.java         # Response payload
     │   │       ├── CartItemRequest.java         # Add-to-cart payload
@@ -364,17 +413,18 @@ demo1/
     │   │       ├── OrderResponse.java           # Order response (items + computed totalPrice)
     │   │       └── OrderItemResponse.java       # Order line response
     │   └── resources/
-    │       └── application.properties            # Server & DB configuration
+    │       ├── application.properties            # Server, DB & actuator configuration
+    │       └── application-dev.properties        # `dev` profile: SQL logging only
     └── test/
         ├── java/com/example/demo1/
         │   ├── Demo1ApplicationTests.java        # Context smoke test
         │   ├── controller/
-        │   │   └── ApiContractTest.java          # 35 MockMvc tests locking status codes & messages
+        │   │   └── ApiContractTest.java          # 41 MockMvc tests locking status codes, error envelope & messages
         │   ├── service/
         │   │   ├── CartServiceTest.java          # 21 tests: cart behaviour & checkout
         │   │   └── OrderPaymentFlowTest.java     # 18 tests: payment, rollback, concurrency
         │   └── e2e/
-        │       └── CashierFlowEndToEndTest.java  # 9 tests over real HTTP on a file-backed H2
+        │       └── CashierFlowEndToEndTest.java  # 10 tests over real HTTP on a file-backed H2
         └── resources/
             ├── application.properties            # In-memory H2 so tests never touch demo1db.mv.db
             └── application-e2e.properties        # File-backed H2 with the production URL shape
@@ -389,12 +439,23 @@ demo1/
 | `spring.datasource.url` | `jdbc:h2:file:./demo1db;AUTO_SERVER=TRUE` | H2 database file location |
 | `spring.datasource.driver-class-name` | `org.h2.Driver` | H2 JDBC driver |
 | `spring.datasource.username` / `password` | `sa` / *(empty)* | Local dev credentials |
-| `spring.jpa.database-platform` | `org.hibernate.dialect.H2Dialect` | H2 dialect for Hibernate |
 | `spring.jpa.hibernate.ddl-auto` | `update` | Auto-create/update table schema (keeps data between restarts) |
-| `spring.jpa.show-sql` | `true` | Logs every generated statement |
-| `spring.jpa.properties.hibernate.format_sql` | `true` | Pretty-prints the logged SQL |
 | `spring.jpa.open-in-view` | `false` | Lazy associations must load inside the service transaction |
 | `spring.jpa.properties.hibernate.jdbc.time_zone` | `UTC` | Stable `LocalDateTime` values across environments |
+| `management.endpoints.web.exposure.include` | `health` | Exposes `/actuator/health` and nothing else |
+
+**SQL logging lives in the `dev` profile**, not in `application.properties`:
+
+```properties
+# application-dev.properties , activate with --spring.profiles.active=dev
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.format_sql=true
+```
+
+`spring.jpa.database-platform` is deliberately **not** set. Hibernate detects H2 from the JDBC
+connection and selects `H2Dialect` by itself; declaring it by hand only adds a line that can drift
+out of date , and it used to produce the `HHH90000025` warning ("dialect was explicitly set, so
+automatic detection is skipped").
 
 > **Do not add `DB_CLOSE_ON_EXIT=FALSE` to the H2 URL.** H2 rejects it together
 > with `AUTO_SERVER=TRUE` (`Feature not supported`, error 50100, SQLState `HYC00`)
@@ -417,15 +478,15 @@ demo1/
 ./mvnw test
 ```
 
-The suite has **84 tests** across five classes:
+The suite has **91 tests** across five classes:
 
 | Class | Tests | Scope |
 | --- | --- | --- |
 | `Demo1ApplicationTests` | 1 | Spring context loads |
 | `CartServiceTest` | 21 | Cart accumulation, quantity updates, removal, checkout, and that the cart never touches stock |
 | `OrderPaymentFlowTest` | 18 | Payment, rollback, `cancel`/`delete` guards, the `10-7-10-13` regression, and four concurrency races: many orders for one unit, many cashiers for one order, and payment racing against `cancel` and against `delete` |
-| `ApiContractTest` | 35 | HTTP contract: status codes and error messages via MockMvc |
-| `CashierFlowEndToEndTest` | 9 | The whole flow over real HTTP against a file-backed database (see below) |
+| `ApiContractTest` | 41 | HTTP contract via MockMvc: status codes, the shared error envelope (including every not-found path, unmapped paths and wrong methods), body/path-variable validation, and the exact error messages |
+| `CashierFlowEndToEndTest` | 10 | The whole flow over real HTTP against a file-backed database, plus the health endpoint (see below) |
 
 Four of the five classes run against an isolated in-memory H2 database
 (`src/test/resources/application.properties`, `jdbc:h2:mem:demo1test` with
@@ -439,7 +500,7 @@ Three deliberate design choices in the test suite:
   must run in its own transaction so that real commit/rollback behaviour is
   verified; a test-level transaction would join the service transaction and make
   "stock was left untouched" assertions meaningless.
-- **The three in-memory `@SpringBootTest` classes share one database** (`demo1test`,
+- **The four in-memory `@SpringBootTest` classes share one database** (`demo1test`,
   kept alive by `DB_CLOSE_DELAY=-1`) because Spring reuses the cached application
   context. Rows created in one class are still visible in the others, so tests must
   not rely on global row counts or on `id` values starting at 1, and every cart test
@@ -478,6 +539,8 @@ What it covers, and why each case needs a real instance:
 - A payment refused because the stock ran out, and a multi-product payment rolled back in full.
 - Five simultaneous cashiers competing for the last unit, sent as five concurrent HTTP requests:
   exactly one must win and the others must receive `409`.
+- `GET /actuator/health` returning `200` on the real container, so the readiness probe a deployment
+  depends on is proven to be wired.
 
 > It deliberately does not repeat the exhaustive status-code and message assertions that
 > `ApiContractTest` already owns. Keeping one copy of that contract avoids having to update two
@@ -527,47 +590,49 @@ units. There is no "restore" step left, so that can no longer happen.
 
 ## Known Limitations
 
-1. **`description` length mismatch (known, left in code on purpose).**
-   `ProductRequest.description` allows up to 2000 chars (`@Size(max = 2000)`), but
-   `Product.description` has no explicit `@Column(length = ...)`, so Hibernate maps
-   it to `VARCHAR(255)`. A description longer than 255 chars passes bean validation
-   and then fails at flush time (surfacing as a `409` from the
-   `DataIntegrityViolationException` safety net, or a `500`). The fix , either
-   adding `@Column(length = 2000)` to the entity or lowering the DTO limit to 255 ,
-   was consciously deferred, so **keep descriptions under 255 characters** for now.
-2. **No authentication.** A cart is addressed by a client-supplied `customerId` in the URL, so
+1. **No authentication.** A cart is addressed by a client-supplied `customerId` in the URL, so
    anyone who knows the id can read and modify that cart, and `GET /api/orders` exposes every
    order. This is an exercise-scale shortcut, not a security boundary.
-3. **No refund or return flow.** A `PAID` order is terminal and can never be cancelled or
+2. **No refund or return flow.** A `PAID` order is terminal and can never be cancelled or
    deleted, and stock is never given back. A return would need its own explicit operation, with
    a deliberate decision about whether the unit becomes sellable again.
-4. **The checkout stock check is advisory.** It is a read, so between checkout and payment
+3. **The checkout stock check is advisory.** It is a read, so between checkout and payment
    another buyer can take the stock. That is intentional , the authoritative check happens
    atomically at payment , but it means a `PENDING_PAYMENT` order is not a guarantee.
-5. **Carts are never expired.** There is no TTL and no cleanup job, so abandoned carts
+4. **Carts are never expired.** There is no TTL and no cleanup job, so abandoned carts
    accumulate. The same is true of `PENDING_PAYMENT` orders.
-6. **No pagination or sorting** on `GET /api/products` and `GET /api/orders`.
-7. **Error bodies are inconsistent** (plain text for service exceptions, Spring
-   Boot's default JSON for validation errors) , see [Error Handling](#error-handling).
-8. **`Order`, `OrderItem`, `Cart` and `CartItem` have no `@Version`**, so concurrent
+5. **No pagination or sorting** on `GET /api/products` and `GET /api/orders`.
+6. **`Order`, `OrderItem`, `Cart` and `CartItem` have no `@Version`**, so concurrent
    modifications to those rows are not protected by optimistic locking (only `Product` is).
    The order lifecycle does not depend on it: every transition is decided by the database, either
    with a conditional `UPDATE` on the status (`pay`, `cancel`) or by taking the order's row lock
    first (`DELETE`, which has to read the row before cascading to its items). Two writes to the same
    order therefore serialise instead of overwriting each other.
-9. **No unique constraint on `products.name`**, so duplicate product names are allowed.
-10. **No explicit index on `order_items.product_id` or `cart_items.product_id`.** The unique
-    constraints are `(order_id, product_id)` and `(cart_id, product_id)`, which cannot serve
-    product-only lookups efficiently (used by `countByProductId`).
+7. **No unique constraint on `products.name`**, so duplicate product names are allowed.
+
+Three former limitations have since been fixed and are listed here only so the reasoning survives:
+`description` no longer has a DTO/column mismatch (both are 255), every error path now returns the
+same JSON envelope, and `order_items.product_id` / `cart_items.product_id` are indexed.
 
 ### Upgrading an existing database
 
 `carts` and `cart_items` are new tables and are created automatically by `ddl-auto=update`.
-`orders` is not: its `status` column is a native H2 `ENUM`, and the values changed from
-`('CANCELLED','COMPLETED','PENDING')` to `('CANCELLED','PAID','PENDING_PAYMENT')`. `update`
-adds the new `paid_at` column but will **not** widen the enum type, so an existing database
-will reject the new status values at runtime. Delete `demo1db.mv.db`, or drop `orders` and
-`order_items` by hand, before running this version. See
+
+`orders` used to be the awkward case: its `status` column was a native H2 `ENUM` whose values
+changed from `('CANCELLED','COMPLETED','PENDING')` to
+`('CANCELLED','PAID','PENDING_PAYMENT')`, and an enum type cannot be widened in place. That is no
+longer a problem. The entity now maps the status with
+`@JdbcTypeCode(SqlTypes.VARCHAR)`, so Hibernate emits a real `ALTER` and converts the column:
+
+```sql
+alter table if exists orders
+   alter column status set data type varchar(32)
+```
+
+This was verified against a database created with the old enum definition: the conversion ran on
+startup, the pre-existing `PENDING_PAYMENT` row survived it, and the app then served the full
+checkout-and-pay flow with no manual intervention. **You can point this version at an existing
+`demo1db.mv.db`; there is no need to delete it or to drop `orders` by hand.** See
 [Migrations](DB_SCHEMA.md#migrations).
 
 ## References

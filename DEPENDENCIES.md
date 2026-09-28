@@ -2,13 +2,17 @@
 
 This document describes every dependency declared in `pom.xml` , what it does and where it is used in the source code.
 
-> All listed dependencies are currently **in use** , there are no unused dependencies. The previously unused `spring-boot-starter-actuator` has been removed, and the SQLite stack was replaced by H2 (see [Removed dependencies](#removed-dependencies)).
+> All listed dependencies are currently **in use** , there are no unused dependencies. The SQLite
+> stack was replaced by H2 (see [Removed dependencies](#removed-dependencies)), and
+> `spring-boot-starter-actuator` was re-added after the health endpoint turned out to be wanted for
+> deployments.
 
 | Dependency | Version | Scope | Purpose | Used in |
 | --- | --- | --- | --- | --- |
 | `spring-boot-starter-webmvc` | managed by parent | compile | Web / REST MVC layer: `@RestController`, `@RequestMapping`, HTTP mapping, JSON serialization via Jackson, embedded Tomcat. | `controller/ProductController.java`, `controller/OrderController.java`, all `/api/*` endpoints. |
 | `spring-boot-starter-data-jpa` | managed by parent | compile | Data / ORM layer (Spring Data JPA + Hibernate): `JpaRepository`, `@Entity`, table-to-object mapping, SQL generation, transaction management. | `repository/*Repository.java`, `model/*.java`, `service/*Service.java`. |
-| `spring-boot-starter-validation` | managed by parent | compile | Bean validation (Jakarta Bean Validation). Enables `@Valid` and constraint annotations on DTOs. | `dto/*Request.java` (`@NotBlank`, `@Size`, `@NotNull`, `@Min`, `@DecimalMin`, `@Digits`, `@NotEmpty`), `controller/*Controller.java` (`@Valid @RequestBody`). |
+| `spring-boot-starter-validation` | managed by parent | compile | Bean validation (Jakarta Bean Validation). Enables `@Valid` and constraint annotations on DTOs. | `dto/*Request.java` (`@NotBlank`, `@Size`, `@NotNull`, `@Min`, `@DecimalMin`, `@Digits`, `@NotEmpty`), `controller/*Controller.java` (`@Valid @RequestBody`, and `@Size`/`@Pattern` on `customerId` path variables). |
+| `spring-boot-starter-actuator` | managed by parent | compile | Health endpoint for deployment readiness probes. Only `health` is exposed, via `management.endpoints.web.exposure.include`. | `src/main/resources/application.properties`, `GET /actuator/health`, asserted by `e2e/CashierFlowEndToEndTest.exposesAHealthEndpoint()`. |
 | `springdoc-openapi-starter-webmvc-ui` | `3.1.0` (explicit) | compile | Automatic API documentation: generates the OpenAPI 3 spec and serves Swagger UI. | `controller/*Controller.java` (`@Tag`, `@Operation`), `dto/*` (`@Schema`). Endpoints: `/swagger-ui.html`, `/v3/api-docs`. |
 | `h2` (com.h2database) | `2.4.240` (managed by parent) | compile | H2 JDBC driver **and** the embedded database engine. Connects the application to the file-based H2 database. No explicit `<version>` in `pom.xml`. | `application.properties` , `spring.datasource.url=jdbc:h2:file:./demo1db;AUTO_SERVER=TRUE`, `driver-class-name=org.h2.Driver`. Also the in-memory test datasource. |
 | `spring-boot-starter-webmvc-test` | managed by parent | test | Test-only starter (not packaged into the production jar). Provides JUnit 5, MockMvc, `@SpringBootTest`, `@AutoConfigureMockMvc` and `RestTestClient`. | `Demo1ApplicationTests.java` (context smoke test), `service/CartServiceTest.java` (cart behaviour & checkout), `service/OrderPaymentFlowTest.java` (payment, rollback, concurrency), `controller/ApiContractTest.java` (HTTP contract via MockMvc), `e2e/CashierFlowEndToEndTest.java` (the same flow over real HTTP against a file-backed database). |
@@ -39,14 +43,42 @@ Spring Data JPA starter combining Spring Data repositories and Hibernate. Provid
 - Entity lifecycle: `@Entity`, `@Id`, `@Column`, `@Table`, `@ManyToOne`, `@OneToMany`, `@Version`, `@UniqueConstraint`.
 - Transaction management (`@Transactional`, including `readOnly = true`).
 - Query hints / fetch plans: `@EntityGraph` is used by `OrderRepository` and `CartRepository` to avoid the N+1 problem when serializing orders and carts.
-- Bulk updates: `@Modifying` plus `@Query` on `ProductRepository.decrementStockIfAvailable` issues the conditional stock decrement as one atomic statement, which is what makes concurrent payments safe.
+- Bulk updates: `@Modifying` plus `@Query` issues the state transitions as single conditional
+  statements, which is what makes concurrent payments safe. `ProductRepository.decrementStockIfAvailable`
+  does the stock decrement, while `OrderRepository.claimForPayment` and `cancelIfPending` claim the
+  order's status , each is one statement whose `WHERE` clause carries the precondition, so the
+  database arbitrates instead of the application.
+
+### spring-boot-starter-actuator
+
+Adds production-ready operational endpoints. This project uses it for exactly one thing: a
+readiness probe.
+
+```properties
+management.endpoints.web.exposure.include=health
+```
+
+Only `GET /actuator/health` is published; every other actuator path returns `404`. Actuator
+exposes nothing unless a management endpoint is explicitly included, so adding the starter on its
+own would not have leaked anything , but naming `health` alone also keeps `/actuator` from
+advertising what else exists.
+
+The `e2e` test asserts the endpoint on a real container, because a health check that only works in
+a test context is not a health check.
+
+> **History:** this dependency was removed once, on the grounds that nothing referenced it. That
+> was true of the code but wrong about the deployment: a container needs something to poll before
+> it sends traffic. It is back, with a narrow exposure list.
 
 ### spring-boot-starter-validation
 
 Enables Jakarta Bean Validation 3.0. Used with `@Valid` on the request body to automatically validate DTOs before they reach the service layer. Constraints used in request DTOs:
 
 - `@NotBlank` , field is required and must not be blank (`ProductRequest.name`).
-- `@Size` , length limits (`name` max 255, `description` max 2000).
+- `@Size` , length limits (`name` max 255, `description` max 255).
+- `@Pattern` , character set restriction on the `customerId` path variable (`[A-Za-z0-9._-]+`),
+  which is what stops a malformed cart URL from reaching the database. Path variables need
+  `@Validated` on the controller class to be validated at all.
 - `@NotNull` , field is required (`price`, `stock`, `productId`, `quantity`).
 - `@Min` , numeric lower bound (`quantity >= 1`, `stock >= 0`).
 - `@Max` , numeric upper bound (`quantity <= 999` on cart lines).
@@ -118,9 +150,11 @@ Test scope only , not included in the final jar. Provides integration-test infra
 
 | Dependency | Reason |
 | --- | --- |
-| `spring-boot-starter-actuator` | No references anywhere in the source or configuration (no actuator endpoints, health checks, or metrics enabled). Dead dependency , removed to shrink the artifact and speed up build/startup. |
 | `sqlite-jdbc` (org.xerial, `3.46.1.0`) | SQLite JDBC driver. No longer needed after the database was migrated from SQLite to H2. |
 | `hibernate-community-dialects` | Provided `org.hibernate.community.dialect.SQLiteDialect`. H2 has a dialect built into `hibernate-core`, so this package became unnecessary. |
+
+`spring-boot-starter-actuator` also appeared here once. It is a live dependency again , see
+[spring-boot-starter-actuator](#spring-boot-starter-actuator) above.
 
 ## Dependency graph (runtime)
 
@@ -128,6 +162,7 @@ Test scope only , not included in the final jar. Provides integration-test infra
 spring-boot-starter-webmvc ──► embedded Tomcat, Spring MVC, Jackson
 spring-boot-starter-data-jpa ──► Spring Data JPA ──► Hibernate ORM ──► HikariCP
 spring-boot-starter-validation ──► Hibernate Validator (Jakarta Bean Validation)
+spring-boot-starter-actuator ──► health endpoint (/actuator/health only)
 springdoc-openapi-starter-webmvc-ui ──► OpenAPI 3 generator + Swagger UI
 h2 ──► JDBC driver + embedded database engine
 ```
