@@ -2,6 +2,7 @@ package com.example.demo1.service;
 
 import com.example.demo1.dto.OrderResponse;
 import com.example.demo1.exception.ConflictException;
+import com.example.demo1.exception.NotFoundException;
 import com.example.demo1.model.Order;
 import com.example.demo1.model.OrderItem;
 import com.example.demo1.repository.OrderRepository;
@@ -34,7 +35,7 @@ public class OrderService {
     public OrderResponse findById(Long id) {
         return orderRepository.findById(id)
                 .map(OrderResponse::from)
-                .orElse(null);
+                .orElseThrow(() -> new NotFoundException("Order " + id + " does not exist"));
     }
 
     @Transactional
@@ -46,7 +47,7 @@ public class OrderService {
         if (claimed == 0) {
             Order existing = orderRepository.findById(id).orElse(null);
             if (existing == null) {
-                return null;
+                throw new NotFoundException("Order " + id + " does not exist");
             }
             throw new ConflictException(
                     "Order " + id + " is " + existing.getStatus() + " and can no longer be paid");
@@ -76,7 +77,7 @@ public class OrderService {
         if (cancelled == 0) {
             Order existing = orderRepository.findById(id).orElse(null);
             if (existing == null) {
-                return null;
+                throw new NotFoundException("Order " + id + " does not exist");
             }
             throw new ConflictException(
                     "Order " + id + " is " + existing.getStatus() + " and can no longer be cancelled");
@@ -86,17 +87,14 @@ public class OrderService {
     }
 
     @Transactional
-    public boolean deleteById(Long id) {
-        Order order = orderRepository.findByIdForUpdate(id).orElse(null);
-        if (order == null) {
-            return false;
-        }
+    public void deleteById(Long id) {
+        Order order = orderRepository.findByIdForUpdate(id)
+                .orElseThrow(() -> new NotFoundException("Order " + id + " does not exist"));
         if (order.getStatus() == Order.Status.PAID) {
             throw new ConflictException(
                     "Order " + id + " has been paid and cannot be deleted");
         }
 
         orderRepository.delete(order);
-        return true;
     }
 }

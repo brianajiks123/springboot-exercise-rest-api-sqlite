@@ -31,27 +31,26 @@ public class OrderController {
 
     @GetMapping("/{id}")
     @Operation(summary = "Get an order by ID")
-    public ResponseEntity<OrderResponse> getOrderById(@PathVariable Long id) {
-        return ResponseEntity.ofNullable(orderService.findById(id));
+    public OrderResponse getOrderById(@PathVariable Long id) {
+        return orderService.findById(id);
     }
 
     @PostMapping("/{id}/pay")
     @Operation(summary = "Pay an order at the cashier", description = "Marks the order PAID and deducts the ordered quantities from product stock. This is the only operation in the API that changes stock because of a sale. Returns 409 when the order is not awaiting payment or a product ran out of stock.")
-    public ResponseEntity<OrderResponse> payOrder(@PathVariable Long id) {
-        return ResponseEntity.ofNullable(orderService.pay(id));
+    public OrderResponse payOrder(@PathVariable Long id) {
+        return orderService.pay(id);
     }
 
     @PostMapping("/{id}/cancel")
     @Operation(summary = "Cancel an unpaid order", description = "Marks the order CANCELLED. Product stock is not affected, because an unpaid order never deducted any.")
-    public ResponseEntity<OrderResponse> cancelOrder(@PathVariable Long id) {
-        return ResponseEntity.ofNullable(orderService.cancel(id));
+    public OrderResponse cancelOrder(@PathVariable Long id) {
+        return orderService.cancel(id);
     }
 
     @DeleteMapping("/{id}")
     @Operation(summary = "Delete an unpaid order", description = "Only PENDING_PAYMENT and CANCELLED orders can be deleted. A PAID order is part of the sales record and returns 409.")
     public ResponseEntity<Void> deleteOrder(@PathVariable Long id) {
-        return orderService.deleteById(id)
-                ? ResponseEntity.noContent().build()
-                : ResponseEntity.notFound().build();
+        orderService.deleteById(id);
+        return ResponseEntity.noContent().build();
     }
 }

@@ -18,6 +18,7 @@ public class Product {
     @Column(nullable = false, precision = 19, scale = 2)
     private BigDecimal price;
 
+    @Column(nullable = false)
     private Integer stock;
 
     @Version
@@ -73,10 +74,6 @@ public class Product {
 
     public void setStock(Integer stock) {
         this.stock = stock;
-    }
-
-    public int availableStock() {
-        return stock == null ? 0 : stock;
     }
 
     public Long getVersion() {

@@ -36,8 +36,8 @@ public class ProductController {
 
     @GetMapping("/{id}")
     @Operation(summary = "Get a product by ID")
-    public ResponseEntity<ProductResponse> getProductById(@PathVariable Long id) {
-        return ResponseEntity.ofNullable(productService.findById(id));
+    public ProductResponse getProductById(@PathVariable Long id) {
+        return productService.findById(id);
     }
 
     @PostMapping
@@ -49,14 +49,15 @@ public class ProductController {
 
     @PutMapping("/{id}")
     @Operation(summary = "Update a product by ID")
-    public ResponseEntity<ProductResponse> updateProduct(@PathVariable Long id,
+    public ProductResponse updateProduct(@PathVariable Long id,
             @Valid @RequestBody ProductRequest request) {
-        return ResponseEntity.ofNullable(productService.update(id, request));
+        return productService.update(id, request);
     }
 
     @DeleteMapping("/{id}")
     @Operation(summary = "Delete a product by ID")
     public ResponseEntity<Void> deleteProduct(@PathVariable Long id) {
-        return productService.deleteById(id) ? ResponseEntity.noContent().build() : ResponseEntity.notFound().build();
+        productService.deleteById(id);
+        return ResponseEntity.noContent().build();
     }
 }

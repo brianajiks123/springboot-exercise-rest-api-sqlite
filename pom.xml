@@ -61,6 +61,12 @@
 			<version>3.1.0</version>
 		</dependency>
 
+		<!-- Health endpoint (/actuator/health) so a deployment can tell when the app is ready -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
+
 		<!-- H2 Database (file-based, fully compatible with Hibernate) -->
 		<dependency>
 			<groupId>com.h2database</groupId>

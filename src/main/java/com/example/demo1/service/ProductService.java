@@ -3,6 +3,7 @@ package com.example.demo1.service;
 import com.example.demo1.dto.ProductRequest;
 import com.example.demo1.dto.ProductResponse;
 import com.example.demo1.exception.ConflictException;
+import com.example.demo1.exception.NotFoundException;
 import com.example.demo1.model.Product;
 import com.example.demo1.repository.CartItemRepository;
 import com.example.demo1.repository.OrderItemRepository;
@@ -35,7 +36,7 @@ public class ProductService {
     public ProductResponse findById(Long id) {
         return productRepository.findById(id)
                 .map(ProductResponse::from)
-                .orElse(null);
+                .orElseThrow(() -> new NotFoundException("Product " + id + " does not exist"));
     }
 
     @Transactional
@@ -47,18 +48,16 @@ public class ProductService {
 
     @Transactional
     public ProductResponse update(Long id, ProductRequest request) {
-        return productRepository.findById(id)
-                .map(product -> {
-                    applyRequest(product, request);
-                    return ProductResponse.from(productRepository.save(product));
-                })
-                .orElse(null);
+        Product product = productRepository.findById(id)
+                .orElseThrow(() -> new NotFoundException("Product " + id + " does not exist"));
+        applyRequest(product, request);
+        return ProductResponse.from(productRepository.save(product));
     }
 
     @Transactional
-    public boolean deleteById(Long id) {
+    public void deleteById(Long id) {
         if (!productRepository.existsById(id)) {
-            return false;
+            throw new NotFoundException("Product " + id + " does not exist");
         }
 
         if (orderItemRepository.countByProductId(id) > 0) {
@@ -71,7 +70,6 @@ public class ProductService {
         }
 
         productRepository.deleteById(id);
-        return true;
     }
 
     private void applyRequest(Product product, ProductRequest request) {
