@@ -3,6 +3,8 @@ package com.example.demo1.service;
 import com.example.demo1.dto.CartItemRequest;
 import com.example.demo1.dto.CartResponse;
 import com.example.demo1.dto.OrderResponse;
+import com.example.demo1.exception.BadRequestException;
+import com.example.demo1.exception.NotFoundException;
 import com.example.demo1.model.Order;
 import com.example.demo1.model.Product;
 import com.example.demo1.repository.CartRepository;
@@ -122,7 +124,7 @@ class CartServiceTest {
 
     @Test
     void addItem_unknownProduct_throws() {
-        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+        BadRequestException ex = assertThrows(BadRequestException.class,
                 () -> cartService.addItem(newCustomer(), new CartItemRequest(999_999L, 1)));
 
         assertTrue(ex.getMessage().contains("does not exist"), ex.getMessage());
@@ -143,19 +145,20 @@ class CartServiceTest {
     }
 
     @Test
-    void updateItemQuantity_unknownCart_returnsNull() {
+    void updateItemQuantity_unknownCart_returnsNotFound() {
         Product product = givenProduct("Cable", 5.0, 10);
 
-        assertNull(cartService.updateItemQuantity(newCustomer(), product.getId(), 1));
+        assertThrows(NotFoundException.class,
+                () -> cartService.updateItemQuantity(newCustomer(), product.getId(), 1));
     }
 
     @Test
-    void updateItemQuantity_unknownLine_returnsNull() {
+    void updateItemQuantity_unknownLine_returnsNotFound() {
         Product product = givenProduct("Adapter", 15.0, 10);
         String customer = newCustomer();
         cartService.addItem(customer, new CartItemRequest(product.getId(), 1));
 
-        assertNull(cartService.updateItemQuantity(customer, 999_999L, 3));
+        assertThrows(NotFoundException.class, () -> cartService.updateItemQuantity(customer, 999_999L, 3));
     }
 
     // ------------------------------------------------------------- removing
@@ -168,7 +171,7 @@ class CartServiceTest {
         cartService.addItem(customer, new CartItemRequest(first.getId(), 1));
         cartService.addItem(customer, new CartItemRequest(second.getId(), 1));
 
-        assertTrue(cartService.removeItem(customer, first.getId()));
+        cartService.removeItem(customer, first.getId());
 
         CartResponse cart = cartService.getCart(customer);
         assertEquals(1, cart.items().size());
@@ -176,13 +179,13 @@ class CartServiceTest {
     }
 
     @Test
-    void removeItem_unknownLine_returnsFalse() {
+    void removeItem_unknownLine_returnsNotFound() {
         Product product = givenProduct("Gamma", 10.0, 10);
         String customer = newCustomer();
         cartService.addItem(customer, new CartItemRequest(product.getId(), 1));
 
-        assertEquals(false, cartService.removeItem(customer, 999_999L));
-        assertEquals(false, cartService.removeItem(newCustomer(), product.getId()));
+        assertThrows(NotFoundException.class, () -> cartService.removeItem(customer, 999_999L));
+        assertThrows(NotFoundException.class, () -> cartService.removeItem(newCustomer(), product.getId()));
     }
 
     @Test
@@ -191,7 +194,7 @@ class CartServiceTest {
         String customer = newCustomer();
         cartService.addItem(customer, new CartItemRequest(product.getId(), 2));
 
-        assertTrue(cartService.clear(customer));
+        cartService.clear(customer);
 
         CartResponse cart = cartService.getCart(customer);
         assertTrue(cart.items().isEmpty());
@@ -200,14 +203,14 @@ class CartServiceTest {
     }
 
     @Test
-    void clear_onAnEmptyOrUnknownCart_returnsFalse() {
+    void clear_onAnEmptyOrUnknownCart_returnsNotFound() {
         Product product = givenProduct("Delta", 10.0, 5);
         String customer = newCustomer();
         cartService.addItem(customer, new CartItemRequest(product.getId(), 1));
         cartService.clear(customer);
 
-        assertEquals(false, cartService.clear(customer));
-        assertEquals(false, cartService.clear(newCustomer()));
+        assertThrows(NotFoundException.class, () -> cartService.clear(customer));
+        assertThrows(NotFoundException.class, () -> cartService.clear(newCustomer()));
     }
 
     // -------------------------------------------------------------- reading
@@ -291,15 +294,15 @@ class CartServiceTest {
         cartService.addItem(customer, new CartItemRequest(product.getId(), 1));
         cartService.clear(customer);
 
-        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+        BadRequestException ex = assertThrows(BadRequestException.class,
                 () -> cartService.checkout(customer));
 
         assertTrue(ex.getMessage().contains("is empty"), ex.getMessage());
     }
 
     @Test
-    void checkout_unknownCustomer_returnsNull() {
-        assertNull(cartService.checkout(newCustomer()));
+    void checkout_unknownCustomer_returnsNotFound() {
+        assertThrows(NotFoundException.class, () -> cartService.checkout(newCustomer()));
     }
 
     @Test
@@ -308,7 +311,7 @@ class CartServiceTest {
         String customer = newCustomer();
         cartService.addItem(customer, new CartItemRequest(product.getId(), 5));
 
-        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+        BadRequestException ex = assertThrows(BadRequestException.class,
                 () -> cartService.checkout(customer));
 
         assertTrue(ex.getMessage().contains("Insufficient stock"), ex.getMessage());
@@ -323,7 +326,7 @@ class CartServiceTest {
         cartService.checkout(customer);
 
         // The cart was emptied, so a second checkout must fail rather than re-sell the item.
-        assertThrows(IllegalArgumentException.class, () -> cartService.checkout(customer));
+        assertThrows(BadRequestException.class, () -> cartService.checkout(customer));
 
         cartService.addItem(customer, new CartItemRequest(product.getId(), 2));
         OrderResponse second = cartService.checkout(customer);

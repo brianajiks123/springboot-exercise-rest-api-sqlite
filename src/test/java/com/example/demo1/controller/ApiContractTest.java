@@ -8,8 +8,10 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.ResultActions;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -19,7 +21,6 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
-import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -171,7 +172,7 @@ class ApiContractTest {
 
         mockMvc.perform(delete("/api/products/{id}", productId))
                 .andExpect(status().isConflict())
-                .andExpect(content().string(
+                .andExpect(jsonPath("$.message").value(
                         "Product " + productId + " cannot be deleted because it is referenced by existing orders"));
     }
 
@@ -182,7 +183,7 @@ class ApiContractTest {
 
         mockMvc.perform(delete("/api/products/{id}", productId))
                 .andExpect(status().isConflict())
-                .andExpect(content().string(
+                .andExpect(jsonPath("$.message").value(
                         "Product " + productId + " cannot be deleted because it is in a customer's cart"));
     }
 
@@ -239,7 +240,7 @@ class ApiContractTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(cartItemJson(999_999L, 1)))
                 .andExpect(status().isBadRequest())
-                .andExpect(content().string("Product with id 999999 does not exist"));
+                .andExpect(jsonPath("$.message").value("Product with id 999999 does not exist"));
     }
 
     @Test
@@ -330,7 +331,7 @@ class ApiContractTest {
 
         mockMvc.perform(post("/api/carts/{customerId}/checkout", customerId))
                 .andExpect(status().isBadRequest())
-                .andExpect(content().string("Cart of customer " + customerId + " is empty"));
+                .andExpect(jsonPath("$.message").value("Cart of customer " + customerId + " is empty"));
     }
 
     @Test
@@ -347,7 +348,7 @@ class ApiContractTest {
 
         mockMvc.perform(post("/api/carts/{customerId}/checkout", customerId))
                 .andExpect(status().isBadRequest())
-                .andExpect(content().string("Insufficient stock for product: Scarce"));
+                .andExpect(jsonPath("$.message").value("Insufficient stock for product: Scarce"));
     }
 
     // -------------------------------------------------------------------- orders
@@ -382,7 +383,7 @@ class ApiContractTest {
 
         mockMvc.perform(post("/api/orders/{id}/pay", orderId))
                 .andExpect(status().isConflict())
-                .andExpect(content().string("Order " + orderId + " is PAID and can no longer be paid"));
+                .andExpect(jsonPath("$.message").value("Order " + orderId + " is PAID and can no longer be paid"));
 
         mockMvc.perform(get("/api/products/{id}", productId))
                 .andExpect(jsonPath("$.stock").value(9));
@@ -406,7 +407,7 @@ class ApiContractTest {
 
         mockMvc.perform(post("/api/orders/{id}/pay", orderId))
                 .andExpect(status().isConflict())
-                .andExpect(content().string("Insufficient stock for product: RanOut"));
+                .andExpect(jsonPath("$.message").value("Insufficient stock for product: RanOut"));
 
         mockMvc.perform(get("/api/orders/{id}", orderId))
                 .andExpect(jsonPath("$.status").value("PENDING_PAYMENT"));
@@ -433,7 +434,7 @@ class ApiContractTest {
 
         mockMvc.perform(post("/api/orders/{id}/cancel", orderId))
                 .andExpect(status().isConflict())
-                .andExpect(content().string("Order " + orderId + " is PAID and can no longer be cancelled"));
+                .andExpect(jsonPath("$.message").value("Order " + orderId + " is PAID and can no longer be cancelled"));
     }
 
     @Test
@@ -459,7 +460,7 @@ class ApiContractTest {
 
         mockMvc.perform(delete("/api/orders/{id}", orderId))
                 .andExpect(status().isConflict())
-                .andExpect(content().string("Order " + orderId + " has been paid and cannot be deleted"));
+                .andExpect(jsonPath("$.message").value("Order " + orderId + " has been paid and cannot be deleted"));
     }
 
     @Test
@@ -472,5 +473,97 @@ class ApiContractTest {
     void getOrder_unknownId_returns404() throws Exception {
         mockMvc.perform(get("/api/orders/{id}", 999_999L))
                 .andExpect(status().isNotFound());
+    }
+
+    // ------------------------------------------------------------- error envelope
+
+    @Test
+    void invalidBody_returns400WithFieldErrors() throws Exception {
+        mockMvc.perform(post("/api/products")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"description\":\"no name\",\"price\":10.00,\"stock\":1}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.error").value("Bad Request"))
+                .andExpect(jsonPath("$.message").value("Request validation failed"))
+                .andExpect(jsonPath("$.path").value("/api/products"))
+                .andExpect(jsonPath("$.fieldErrors.name").value("Name must not be blank"));
+    }
+
+    @Test
+    void descriptionLongerThanTheColumn_returns400InsteadOfFailingAtFlush() throws Exception {
+        String tooLong = "d".repeat(256);
+
+        mockMvc.perform(post("/api/products")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"TooLong\",\"description\":\"" + tooLong
+                                + "\",\"price\":10.00,\"stock\":1}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors.description")
+                        .value("Description must be at most 255 characters"));
+    }
+
+    @Test
+    void customerIdWithAnUnsupportedCharacter_returns400() throws Exception {
+        mockMvc.perform(get("/api/carts/{customerId}", "not a valid id"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors.customerId")
+                        .value("customerId may only contain letters, digits, dots, underscores and dashes"));
+    }
+
+    @Test
+    void unmappedPath_returns404InTheSameEnvelope() throws Exception {
+        mockMvc.perform(get("/api/nothing-here"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404))
+                .andExpect(jsonPath("$.error").value("Not Found"))
+                .andExpect(jsonPath("$.path").value("/api/nothing-here"));
+    }
+
+    @Test
+    void unmappedMethod_returns405InTheSameEnvelope() throws Exception {
+        mockMvc.perform(post("/api/orders").contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isMethodNotAllowed())
+                .andExpect(jsonPath("$.status").value(405))
+                .andExpect(jsonPath("$.error").value("Method Not Allowed"));
+    }
+
+    /**
+     * Every "resource does not exist" path must carry the same body.
+     *
+     * <p>This is a regression test for a real gap: these endpoints used to answer {@code 404} with
+     * an <em>empty</em> body, because the controllers built the response with
+     * {@code ResponseEntity.ofNullable(...)} / {@code notFound().build()} instead of letting an
+     * exception reach {@code GlobalExceptionHandler}. A client could not tell a missing resource
+     * from a broken server without inspecting the status line.
+     */
+    @Test
+    void everyNotFoundPath_usesTheSameEnvelope() throws Exception {
+        long missing = 999_999L;
+        String absentBody = "{\"name\":\"Absent\",\"price\":1.00,\"stock\":1}";
+
+        List<ResultActions> responses = List.of(
+                mockMvc.perform(get("/api/products/{id}", missing)),
+                mockMvc.perform(put("/api/products/{id}", missing)
+                        .contentType(MediaType.APPLICATION_JSON).content(absentBody)),
+                mockMvc.perform(delete("/api/products/{id}", missing)),
+                mockMvc.perform(get("/api/orders/{id}", missing)),
+                mockMvc.perform(post("/api/orders/{id}/pay", missing)),
+                mockMvc.perform(post("/api/orders/{id}/cancel", missing)),
+                mockMvc.perform(delete("/api/orders/{id}", missing)),
+                mockMvc.perform(put("/api/carts/{customerId}/items/{productId}", newCustomer(), missing)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"quantity\":1}")),
+                mockMvc.perform(delete("/api/carts/{customerId}/items/{productId}", newCustomer(), missing)),
+                mockMvc.perform(delete("/api/carts/{customerId}", newCustomer())),
+                mockMvc.perform(post("/api/carts/{customerId}/checkout", newCustomer())));
+
+        for (ResultActions response : responses) {
+            response.andExpect(status().isNotFound())
+                    .andExpect(jsonPath("$.status").value(404))
+                    .andExpect(jsonPath("$.error").value("Not Found"))
+                    .andExpect(jsonPath("$.message").isNotEmpty())
+                    .andExpect(jsonPath("$.path").isNotEmpty())
+                    .andExpect(jsonPath("$.fieldErrors").isEmpty());
+        }
     }
 }

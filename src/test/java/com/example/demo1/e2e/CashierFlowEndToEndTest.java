@@ -111,6 +111,15 @@ class CashierFlowEndToEndTest {
                 "the schema must really have been written to disk, not kept in memory");
     }
 
+    /** The readiness probe a deployment needs, instead of polling a business endpoint. */
+    @Test
+    void exposesAHealthEndpoint() {
+        EntityExchangeResult<String> health = get("/actuator/health", String.class);
+
+        assertEquals(HttpStatus.OK, health.getStatus());
+        assertTrue(health.getResponseBody().contains("\"status\":\"UP\""), health.getResponseBody());
+    }
+
     // ------------------------------------------------------------------------- helpers
 
     private static String newCustomer() {
@@ -318,7 +327,8 @@ class CashierFlowEndToEndTest {
         EntityExchangeResult<String> refused = payText(orderId);
 
         assertEquals(HttpStatus.CONFLICT, refused.getStatus());
-        assertEquals("Insufficient stock for product: E2E Rare", refused.getResponseBody());
+        assertTrue(refused.getResponseBody().contains("Insufficient stock for product: E2E Rare"),
+                refused.getResponseBody());
         assertEquals(Order.Status.PENDING_PAYMENT.name(), statusOf(orderId),
                 "a refused payment must leave the order waiting at the cashier");
     }
@@ -349,7 +359,8 @@ class CashierFlowEndToEndTest {
         EntityExchangeResult<String> refused = checkoutText(customer);
 
         assertEquals(HttpStatus.BAD_REQUEST, refused.getStatus());
-        assertEquals("Insufficient stock for product: E2E Short", refused.getResponseBody());
+        assertTrue(refused.getResponseBody().contains("Insufficient stock for product: E2E Short"),
+                refused.getResponseBody());
         assertEquals(1, stockOf(product), "a refused checkout writes no stock at all");
         assertEquals(5, readCart(customer).getResponseBody().totalItems(), "and leaves the cart intact");
     }

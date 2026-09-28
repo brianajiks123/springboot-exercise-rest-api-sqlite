@@ -3,6 +3,7 @@ package com.example.demo1.service;
 import com.example.demo1.dto.CartItemRequest;
 import com.example.demo1.dto.OrderResponse;
 import com.example.demo1.exception.ConflictException;
+import com.example.demo1.exception.NotFoundException;
 import com.example.demo1.model.Order;
 import com.example.demo1.model.Product;
 import com.example.demo1.repository.ProductRepository;
@@ -22,9 +23,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -100,8 +99,8 @@ class OrderPaymentFlowTest {
     }
 
     @Test
-    void pay_unknownOrder_returnsNull() {
-        assertNull(orderService.pay(999_999L));
+    void pay_unknownOrder_returnsNotFound() {
+        assertThrows(NotFoundException.class, () -> orderService.pay(999_999L));
     }
 
     @Test
@@ -180,8 +179,8 @@ class OrderPaymentFlowTest {
     }
 
     @Test
-    void cancel_unknownOrder_returnsNull() {
-        assertNull(orderService.cancel(999_999L));
+    void cancel_unknownOrder_returnsNotFound() {
+        assertThrows(NotFoundException.class, () -> orderService.cancel(999_999L));
     }
 
     // ----------------------------------------------------------------- delete
@@ -191,9 +190,9 @@ class OrderPaymentFlowTest {
         Product product = givenProduct("Lamp", 30.0, 10);
         OrderResponse order = orderAwaitingPayment(product, 3);
 
-        assertTrue(orderService.deleteById(order.id()));
+        orderService.deleteById(order.id());
 
-        assertNull(orderService.findById(order.id()));
+        assertThrows(NotFoundException.class, () -> orderService.findById(order.id()));
         assertEquals(10, stockOf(product.getId()));
     }
 
@@ -203,8 +202,8 @@ class OrderPaymentFlowTest {
         OrderResponse order = orderAwaitingPayment(product, 1);
         orderService.cancel(order.id());
 
-        assertTrue(orderService.deleteById(order.id()));
-        assertNull(orderService.findById(order.id()));
+        orderService.deleteById(order.id());
+        assertThrows(NotFoundException.class, () -> orderService.findById(order.id()));
     }
 
     @Test
@@ -221,8 +220,8 @@ class OrderPaymentFlowTest {
     }
 
     @Test
-    void delete_unknownOrder_returnsFalse() {
-        assertFalse(orderService.deleteById(999_999L));
+    void delete_unknownOrder_returnsNotFound() {
+        assertThrows(NotFoundException.class, () -> orderService.deleteById(999_999L));
     }
 
     // ------------------------------------------------------------- regression
@@ -440,17 +439,27 @@ class OrderPaymentFlowTest {
                             return "PAID";
                         } catch (ConflictException ex) {
                             return "REFUSED";
+                        } catch (NotFoundException ex) {
+                            return "MISSING";
                         }
                     },
                     () -> {
                         try {
-                            return orderService.deleteById(order.id()) ? "DELETED" : "MISSING";
+                            orderService.deleteById(order.id());
+                            return "DELETED";
                         } catch (ConflictException ex) {
                             return "REFUSED";
+                        } catch (NotFoundException ex) {
+                            return "MISSING";
                         }
                     });
 
-            OrderResponse remaining = orderService.findById(order.id());
+            OrderResponse remaining;
+            try {
+                remaining = orderService.findById(order.id());
+            } catch (NotFoundException ex) {
+                remaining = null;
+            }
             int stock = stockOf(product.getId());
             if (remaining == null) {
                 assertEquals(50, stock,
