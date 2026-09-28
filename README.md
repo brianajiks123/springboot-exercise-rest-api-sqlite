@@ -26,6 +26,10 @@ and removes the possibility of overselling under concurrency.
   checkout never leaves a half-built order behind.
 - **Line items are sorted by product ID before stock is decremented**, so concurrent payments
   sharing products cannot deadlock.
+- **Concurrent cart writes are serialised, not lost.** Every cart mutation takes the cart's row
+  lock (`SELECT ... FOR UPDATE`) before reading it, so two simultaneous `addItem` calls cannot both
+  read the same quantity and write it back. The second waits and then sees the first, which is what
+  stops an increment from disappearing without an error.
 - **N+1-free listing:** `OrderRepository` and `CartRepository` use `@EntityGraph` to fetch items
   and their products in a single query.
 - Layered architecture: `Controller → Service → Repository`, with **DTOs** separated from the entity
@@ -41,7 +45,7 @@ and removes the possibility of overselling under concurrency.
 - Decimal money handling: `BigDecimal` / `NUMERIC(19,2)`, never `double`.
 - Automatic API documentation via **Swagger UI / OpenAPI 3**.
 - File-based H2 database (no separate DB server) , `demo1db.mv.db`.
-- 91 automated tests: a context smoke test, cart and payment service suites (including four
+- 94 automated tests: a context smoke test, cart and payment service suites (including six
   concurrency tests), an HTTP contract suite, and an end-to-end suite that drives a real running
   instance over HTTP against a file-backed database.
 
@@ -317,6 +321,7 @@ Every failure , whatever raised it , is rendered as the same JSON body by
 | `NotFoundException` | `404 Not Found` | The exception message (e.g. `Order 999 does not exist`) |
 | `MethodArgumentNotValidException` (bad body) | `400 Bad Request` | `Request validation failed`, with `fieldErrors` filled in |
 | `HandlerMethodValidationException` / `ConstraintViolationException` (bad path variable) | `400 Bad Request` | `Request validation failed`, with `fieldErrors` filled in |
+| `MethodArgumentTypeMismatchException` (path variable that cannot be parsed as its type) | `400 Bad Request` | `Parameter 'id' must be a number, but was 'abc'` |
 | `HttpMessageNotReadableException` | `400 Bad Request` | `Request body is missing or malformed` |
 | `OptimisticLockingFailureException` | `409 Conflict` | `The product was modified by another request. Please retry.` |
 | `DataIntegrityViolationException` | `409 Conflict` | `The request conflicts with the current state of the data.` |
@@ -343,6 +348,13 @@ error:
 > therefore checks the exception at runtime and, when it is an `ErrorResponse`, reuses Spring's
 > status and detail. That is what stops a typo in a URL from escaping the envelope as Boot's default
 > error document.
+>
+> **A path variable that cannot be parsed is not an `ErrorResponse` either.** The catch-all only
+> rescues exceptions that implement that interface, and `MethodArgumentTypeMismatchException` does
+> not , it extends `TypeMismatchException`. So `GET /api/products/abc` used to fall all the way
+> through to the generic `500` and log a stack trace, telling the caller nothing about the real
+> mistake. It now has its own handler and answers `400` naming the parameter and the offending
+> value.
 >
 > **"Not found" is a service decision, not a controller shortcut.** The services throw
 > `NotFoundException` instead of returning `null`, and the controllers no longer answer with
@@ -419,9 +431,9 @@ demo1/
         ├── java/com/example/demo1/
         │   ├── Demo1ApplicationTests.java        # Context smoke test
         │   ├── controller/
-        │   │   └── ApiContractTest.java          # 41 MockMvc tests locking status codes, error envelope & messages
+        │   │   └── ApiContractTest.java          # 43 MockMvc tests locking status codes, error envelope & messages
         │   ├── service/
-        │   │   ├── CartServiceTest.java          # 21 tests: cart behaviour & checkout
+        │   │   ├── CartServiceTest.java          # 22 tests: cart behaviour, checkout & concurrent adds
         │   │   └── OrderPaymentFlowTest.java     # 18 tests: payment, rollback, concurrency
         │   └── e2e/
         │       └── CashierFlowEndToEndTest.java  # 10 tests over real HTTP on a file-backed H2
@@ -478,14 +490,14 @@ automatic detection is skipped").
 ./mvnw test
 ```
 
-The suite has **91 tests** across five classes:
+The suite has **94 tests** across five classes:
 
 | Class | Tests | Scope |
 | --- | --- | --- |
 | `Demo1ApplicationTests` | 1 | Spring context loads |
-| `CartServiceTest` | 21 | Cart accumulation, quantity updates, removal, checkout, and that the cart never touches stock |
+| `CartServiceTest` | 22 | Cart accumulation, quantity updates, removal, checkout, that the cart never touches stock, and one concurrency race: many simultaneous adds of the same product |
 | `OrderPaymentFlowTest` | 18 | Payment, rollback, `cancel`/`delete` guards, the `10-7-10-13` regression, and four concurrency races: many orders for one unit, many cashiers for one order, and payment racing against `cancel` and against `delete` |
-| `ApiContractTest` | 41 | HTTP contract via MockMvc: status codes, the shared error envelope (including every not-found path, unmapped paths and wrong methods), body/path-variable validation, and the exact error messages |
+| `ApiContractTest` | 43 | HTTP contract via MockMvc: status codes, the shared error envelope (including every not-found path, unmapped paths and wrong methods), body/path-variable validation (including a path variable that cannot be parsed as its type), and the exact error messages |
 | `CashierFlowEndToEndTest` | 10 | The whole flow over real HTTP against a file-backed database, plus the health endpoint (see below) |
 
 Four of the five classes run against an isolated in-memory H2 database
@@ -506,13 +518,15 @@ Three deliberate design choices in the test suite:
   not rely on global row counts or on `id` values starting at 1, and every cart test
   uses a fresh random `customerId`. `CashierFlowEndToEndTest` runs in its own context
   against its own database, so that sharing does not affect it.
-- **`LOCK_TIMEOUT` is raised to 10 s in the test datasource** so that
-  `concurrentPayments_cannotOversellTheLastUnit` measures correctness rather than
-  H2's patience: the losing threads are *supposed* to block on the winner's row lock.
+- **`LOCK_TIMEOUT` is raised to 10 s in the test datasource** so that the concurrency tests
+  measure correctness rather than H2's patience: the losing threads are *supposed* to block on the
+  winner's row lock. Both primitives in the codebase depend on that , the conditional
+  `UPDATE` used by payment, and the `SELECT ... FOR UPDATE` used by the cart.
 
-> The concurrency test catches only `ConflictException` as a legitimate loss, so an
-> unexpected failure (for example a lock timeout) fails the test loudly instead of being
-> silently counted as a correct rejection.
+> The concurrency tests catch only the *expected* rejection as a legitimate loss
+> (`ConflictException` for payment, nothing at all for a cart add, which must always succeed), so an
+> unexpected failure such as a lock timeout fails the test loudly instead of being silently counted
+> as a correct rejection.
 
 ### End-to-end HTTP test
 
@@ -603,11 +617,12 @@ units. There is no "restore" step left, so that can no longer happen.
    accumulate. The same is true of `PENDING_PAYMENT` orders.
 5. **No pagination or sorting** on `GET /api/products` and `GET /api/orders`.
 6. **`Order`, `OrderItem`, `Cart` and `CartItem` have no `@Version`**, so concurrent
-   modifications to those rows are not protected by optimistic locking (only `Product` is).
-   The order lifecycle does not depend on it: every transition is decided by the database, either
-   with a conditional `UPDATE` on the status (`pay`, `cancel`) or by taking the order's row lock
-   first (`DELETE`, which has to read the row before cascading to its items). Two writes to the same
-   order therefore serialise instead of overwriting each other.
+   modifications to those rows are not protected by optimistic locking (only `Product` is). Neither
+   the order lifecycle nor the cart depends on it: every transition is decided by the database ,
+   with a conditional `UPDATE` on the status (`pay`, `cancel`), by taking the order's row lock first
+   (`DELETE`, which has to read the row before cascading to its items), or by taking the cart's row
+   lock before every cart mutation. Two writes to the same order or the same cart therefore
+   serialise instead of overwriting each other.
 7. **No unique constraint on `products.name`**, so duplicate product names are allowed.
 
 Three former limitations have since been fixed and are listed here only so the reasoning survives:

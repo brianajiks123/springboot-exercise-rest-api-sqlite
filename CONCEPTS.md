@@ -294,8 +294,9 @@ request leaves the database exactly as it was.
 > **Important for tests:** a test annotated with `@Transactional` would make the service join the *test's*
 > transaction, which Spring rolls back at the end. Assertions like "stock was left untouched" would then
 > pass for the wrong reason. `CartServiceTest`, `OrderPaymentFlowTest` and `CashierFlowEndToEndTest`
-> deliberately omit `@Transactional` so each call really commits. That is also what makes the two
-> concurrency tests meaningful , `concurrentPayments_cannotOversellTheLastUnit` at the service level, and
+> deliberately omit `@Transactional` so each call really commits. That is also what makes the concurrency
+> tests meaningful , `concurrentPayments_cannotOversellTheLastUnit` at the service level,
+> `concurrentAddItemOfTheSameProduct_neverLosesAnIncrement` for the cart's row lock, and
 > `simultaneousCashiers_overRealHttp_onlyOneWinsTheLastUnit` with five genuinely parallel HTTP requests:
 > the competing threads have to see each other's committed writes, which they would not inside one shared
 > test transaction.
@@ -330,8 +331,9 @@ The application maps that to `409 Conflict` with the message
 by optimistic locking. Where a transition must not be lost, the code does not lean on optimistic
 locking at all: it makes the transition itself conditional. Payment claims the order with
 `UPDATE ... WHERE id = ? AND status = 'PENDING_PAYMENT'` rather than checking the status in Java first.
-Cancelling uses the same conditional `UPDATE`, and deleting takes the row lock instead, because it has
-to read the order before cascading to its items.
+Cancelling uses the same conditional `UPDATE`, and deleting takes the order's row lock instead, because
+it has to read the order before cascading to its items. The cart takes the third route , a row lock held
+across the whole read-modify-write , see [Pessimistic locking](#pessimistic-locking-lock) below.
 
 > **Here, `@Version` is not the main defence against overselling.** The payment path uses a single
 > conditional `UPDATE` (`... WHERE id = ? AND stock >= ?`), which *prevents* the lost update rather than
@@ -341,6 +343,54 @@ to read the order before cascading to its items.
 > order. Optimistic locking still protects the plain read-modify-write in `PUT /api/products/{id}`, and
 > the payment's decrement bumps `version` by hand, so a concurrent `PUT` fails its version check instead
 > of silently overwriting a settled sale.
+
+---
+
+## Pessimistic locking (`@Lock`)
+
+**The same lost-update problem, solved by blocking rather than by detecting.** Optimistic locking lets
+both writers proceed and rejects the loser afterwards. Pessimistic locking stops the second writer from
+reading at all until the first has committed:
+
+```java
+@Lock(LockModeType.PESSIMISTIC_WRITE)
+@Query("select c from Cart c where c.customerId = :customerId")
+Optional<Cart> findByCustomerIdForUpdate(@Param("customerId") String customerId);
+```
+
+Hibernate renders that as `SELECT ... FOR UPDATE`: the database takes a write lock on the matching row,
+and any other transaction that asks for the same row **waits** (up to the datasource's `LOCK_TIMEOUT`)
+instead of being handed a stale copy.
+
+**Why the cart needs it.** `addItem` is a read-modify-write on `cart_items.quantity`: read the line, add
+the requested quantity, write it back. Two requests that read `2` at the same time both write `3`, and
+one increment is gone , with *both* calls reporting success. A conditional `UPDATE` cannot help here
+either, because the value being written depends on the value being read. Taking the cart's row lock
+first makes the pair serialise, so the second request reads what the first committed.
+
+**Which primitive is used where, and why:**
+
+| Situation | Primitive | Why not the other one |
+| --- | --- | --- |
+| Payment deducting stock | conditional `UPDATE ... WHERE stock >= ?` | the new value is a pure function of the row (`stock - qty`), so the database can decide without a lock |
+| Payment / cancel claiming a status | conditional `UPDATE ... WHERE status = 'PENDING_PAYMENT'` | same , a fixed target value, nothing to read first |
+| `DELETE /api/orders/{id}` | the order's row lock | it must *read* the order before cascading to `order_items` |
+| Every cart mutation | the cart's row lock | the quantity written depends on the quantity read |
+
+> **A row lock is not free.** It serialises writers on that one cart, so a hot cart becomes a
+> bottleneck, and holding the lock across slow work makes other requests wait. Here the locked region is
+> a handful of statements, which is why the lock was preferred over retrying on conflict: `addItem`
+> *accumulates*, so an optimistic retry would have to re-read and re-apply, and a rejected add is
+> indistinguishable from a successful one to the caller.
+>
+> **The cold-start insert is the one race left.** Locking a row only helps once the row exists. Two
+> *first* `addItem` calls for the same brand-new `customerId` both find nothing and both insert; the
+> unique constraint on `carts.customer_id` then rejects the second with `409 Conflict` rather than
+> silently losing it. That is a loud, retryable failure , unlike the lost update it replaced.
+
+**Related files:** `repository/CartRepository.java` (`findByCustomerIdForUpdate`),
+`service/CartService.java` (every mutating method locks the cart first), `repository/OrderRepository.java`
+(`findByIdForUpdate`).
 
 ---
 
@@ -444,6 +494,7 @@ translates them.
 | `ConflictException` | `409 Conflict` |
 | `OptimisticLockingFailureException` | `409 Conflict` |
 | `DataIntegrityViolationException` | `409 Conflict` (safety net) |
+| `MethodArgumentTypeMismatchException` | `400 Bad Request` |
 
 The three custom exceptions are tiny `RuntimeException`s that differ only in meaning: the request
 itself is wrong (`BadRequestException`), the thing being addressed does not exist
@@ -466,6 +517,11 @@ failed. Two consequences are worth calling out:
   describing a *response*, not a throwable, so it cannot be an `@ExceptionHandler` parameter. The
   catch-all `Exception` handler checks `instanceof ErrorResponse` and reuses Spring's status and
   detail, which is why a typo in a URL looks like every other error instead of Boot's default page.
+- **Not every framework error is an `ErrorResponse`.** `MethodArgumentTypeMismatchException`, raised
+  when a path variable cannot be parsed as its declared type (`GET /api/products/abc`), extends
+  `TypeMismatchException` and implements no such interface, so the catch-all above could not rescue it
+  , it fell through to the generic `500` and logged a stack trace. It needs , and now has , its own
+  handler, which answers `400` naming the parameter and the offending value.
 
 > **Two things worth knowing.** (1) `DataIntegrityViolationException` is a *safety net* , if it fires,
 > the message is generic because the real cause is a database constraint. (2) Bean Validation failures

@@ -138,6 +138,13 @@ security boundary.
 
 **No endpoint in this section changes `products.stock`.**
 
+> **Concurrent writes to the same cart serialise.** Every mutating endpoint here takes the cart's row
+> lock (`SELECT ... FOR UPDATE`) before reading it, so two simultaneous `POST .../items` calls cannot
+> both read the same quantity and write it back , the second waits and then sees the first. Every
+> accepted add therefore survives in the cart. The one exception is the very first request for a
+> brand-new `customerId`: locking a row that does not exist yet cannot help, so if two such requests
+> race, the unique constraint on `carts.customer_id` rejects the loser with `409 Conflict`.
+
 ### `GET /api/carts/{customerId}`
 
 Returns the cart, or an empty cart when the customer has none.
@@ -397,6 +404,7 @@ or an unexpected bug:
 | `NotFoundException` , the addressed resource does not exist | `404` | The exception message, e.g. `Order 999 does not exist` |
 | `MethodArgumentNotValidException` , invalid request body | `400` | `Request validation failed` + `fieldErrors` |
 | `HandlerMethodValidationException` / `ConstraintViolationException` , invalid path variable | `400` | `Request validation failed` + `fieldErrors` |
+| `MethodArgumentTypeMismatchException` , path variable that cannot be parsed as its type, e.g. `GET /api/products/abc` | `400` | `Parameter 'id' must be a number, but was 'abc'` |
 | `HttpMessageNotReadableException` , missing or malformed JSON | `400` | `Request body is missing or malformed` |
 | `OptimisticLockingFailureException` | `409` | `The product was modified by another request. Please retry.` |
 | `DataIntegrityViolationException` (safety net) | `409` | `The request conflicts with the current state of the data.` |
@@ -446,7 +454,7 @@ that endpoint deliberately does not exist:
 | `200` | Read, cart update, payment or cancellation succeeded |
 | `201` | Resource created (`POST /api/products`, `POST /api/carts/{id}/checkout`) |
 | `204` | Deleted, no body (`DELETE`) |
-| `400` | Validation failure, or a business-rule violation on the request itself (unknown product, empty cart, not enough stock at checkout) |
+| `400` | Validation failure, a path variable that cannot be parsed (e.g. `/api/products/abc`), or a business-rule violation on the request itself (unknown product, empty cart, not enough stock at checkout) |
 | `404` | Resource does not exist (product, order, cart, or cart line) |
 | `405` | `POST /api/orders` , orders are created by a cart checkout |
 | `409` | State conflict: insufficient stock at payment, wrong order status, product still referenced, concurrent modification, constraint violation |

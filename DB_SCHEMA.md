@@ -312,6 +312,13 @@ Cancelling claims the status the same way, and `DELETE /api/orders/{id}` takes t
 `payingAndDeletingTheSameOrderAtOnce_neverDeductsStockForAnOrderThatIsGone()` drive each of those
 against a concurrent payment and assert that an abandoned or deleted order never took stock.
 
+The cart is guarded the same way, one level up. `CartService` takes the cart's row lock before every
+mutation, because `addItem` is a read-modify-write whose new value depends on the old one , a
+conditional `UPDATE` cannot express "add to whatever is there" and still be safe:
+`CartServiceTest.concurrentAddItemOfTheSameProduct_neverLosesAnIncrement()` runs eight threads against
+one cart for five rounds and asserts that all eight increments survive. Without the lock, seven of the
+eight disappear while every call still reports success.
+
 Two further details matter:
 
 - **`version` is bumped by hand.** Without it a concurrent `PUT /api/products/{id}` , a
@@ -325,7 +332,10 @@ that already succeeded for that order is rolled back: an order can never end up
 half-settled.
 
 `orders`, `order_items`, `carts` and `cart_items` have **no** `version` column, so
-concurrent modifications to those rows are not protected by optimistic locking.
+concurrent modifications to those rows are not protected by optimistic locking. The cart does not need
+one: every mutating method takes the cart's row lock first (`CartRepository.findByCustomerIdForUpdate`,
+which Hibernate renders as `SELECT ... FOR UPDATE`), so the read-modify-write on `cart_items.quantity`
+serialises instead of letting one increment overwrite another.
 
 ---
 
