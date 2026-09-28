@@ -511,6 +511,30 @@ class ApiContractTest {
                         .value("customerId may only contain letters, digits, dots, underscores and dashes"));
     }
 
+    /**
+     * A path variable that cannot be converted to its declared type is a client mistake, so it must
+     * answer {@code 400}, not {@code 500}. Before this was handled, {@code GET /api/products/abc}
+     * fell through to the catch-all handler and answered {@code 500} with a stack trace, which told
+     * the caller nothing about what was actually wrong with the request.
+     */
+    @Test
+    void nonNumericIdInThePath_returns400InTheSameEnvelope() throws Exception {
+        mockMvc.perform(get("/api/products/{id}", "abc"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.error").value("Bad Request"))
+                .andExpect(jsonPath("$.message").value("Parameter 'id' must be a number, but was 'abc'"))
+                .andExpect(jsonPath("$.path").value("/api/products/abc"))
+                .andExpect(jsonPath("$.fieldErrors").isEmpty());
+    }
+
+    @Test
+    void nonNumericProductIdInsideACartPath_returns400() throws Exception {
+        mockMvc.perform(delete("/api/carts/{customerId}/items/{productId}", newCustomer(), "abc"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value("Parameter 'productId' must be a number, but was 'abc'"));
+    }
+
     @Test
     void unmappedPath_returns404InTheSameEnvelope() throws Exception {
         mockMvc.perform(get("/api/nothing-here"))

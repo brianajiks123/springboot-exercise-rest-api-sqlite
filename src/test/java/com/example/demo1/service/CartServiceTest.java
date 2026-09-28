@@ -12,33 +12,22 @@ import com.example.demo1.repository.ProductRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-
 import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
-
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * Covers the cart: accumulation, absolute quantity updates, removal, clearing and checkout.
- *
- * <p>Deliberately NOT annotated with {@code @Transactional}: each service call must run in its
- * own transaction, so these tests verify real commit behaviour. A test-level transaction would
- * join the service transaction and make "stock was left untouched" assertions meaningless.
- *
- * <p>The single most important assertion in this class is
- * {@link #addItem_doesNotTouchStock()} / {@link #checkout_doesNotDeductStock()}: the cart must
- * never reserve anything, because that is what makes the oversell race impossible.
- *
- * <p>Every test uses a fresh random {@code customerId}. Both {@code @SpringBootTest} classes
- * share one in-memory database (Spring caches the context), so a fixed id would leak cart state
- * between tests.
- */
 @SpringBootTest
 class CartServiceTest {
-
     @Autowired
     private CartService cartService;
 
@@ -111,8 +100,6 @@ class CartServiceTest {
 
     @Test
     void addItem_withQuantityBeyondStock_isStillAllowed() {
-        // E-commerce carts let the buyer add more than is on the shelf; the shortfall is
-        // reported at checkout. Reserving here is exactly what we removed.
         Product product = givenProduct("Rare", 500.0, 1);
         String customer = newCustomer();
 
@@ -332,5 +319,43 @@ class CartServiceTest {
         OrderResponse second = cartService.checkout(customer);
 
         assertEquals(2, second.items().get(0).quantity());
+    }
+
+    // ---------------------------------------------------------- concurrency
+
+    @Test
+    void concurrentAddItemOfTheSameProduct_neverLosesAnIncrement() throws Exception {
+        Product product = givenProduct("Cart race", 10.0, 1000);
+        int writers = 8;
+
+        for (int round = 0; round < 5; round++) {
+            String customer = newCustomer();
+            cartService.addItem(customer, new CartItemRequest(product.getId(), 1));
+
+            CountDownLatch startGate = new CountDownLatch(1);
+            ExecutorService pool = Executors.newFixedThreadPool(writers);
+            try {
+                List<Future<Boolean>> results = new ArrayList<>();
+                for (int i = 0; i < writers; i++) {
+                    results.add(pool.submit(() -> {
+                        startGate.await();
+                        cartService.addItem(customer, new CartItemRequest(product.getId(), 1));
+                        return Boolean.TRUE;
+                    }));
+                }
+
+                startGate.countDown();
+
+                for (Future<Boolean> result : results) {
+                    assertTrue(result.get(30, TimeUnit.SECONDS), "round " + round + ": an addItem failed");
+                }
+            } finally {
+                pool.shutdownNow();
+                assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS), "cart threads did not stop");
+            }
+
+            assertEquals(1 + writers, cartService.getCart(customer).totalItems(),
+                    "round " + round + ": every accepted addItem must survive in the cart");
+        }
     }
 }
