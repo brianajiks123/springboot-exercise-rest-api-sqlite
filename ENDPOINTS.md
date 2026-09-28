@@ -10,8 +10,26 @@ Base URL: `http://localhost:8080` (or whatever host/port the app is running on).
   (`spring.jpa.properties.hibernate.jdbc.time_zone=UTC`).
 - Monetary values are decimals (`BigDecimal`), never binary floats. At most 2 decimal places.
 - **Success bodies are JSON. Error bodies are plain text** for exceptions raised by the service layer
-  (see [Error responses](#4-error-responses)). Bean Validation failures instead return Spring Boot's
+  (see [Error responses](#5-error-responses)). Bean Validation failures instead return Spring Boot's
   default error JSON, so the two shapes differ.
+
+## The flow in one picture
+
+```text
+POST /api/carts/{customerId}/items        add products      (stock untouched)
+            |
+POST /api/carts/{customerId}/checkout     order PENDING_PAYMENT, cart emptied
+            |                             (stock still untouched)
+POST /api/orders/{id}/pay                 cashier takes money -> PAID
+                                          (stock deducted here, once, atomically)
+```
+
+The only alternative to paying is abandoning the order, which changes no stock:
+
+```text
+POST /api/orders/{id}/cancel              PENDING_PAYMENT -> CANCELLED
+DELETE /api/orders/{id}                   only for PENDING_PAYMENT / CANCELLED
+```
 
 ---
 
@@ -80,20 +98,17 @@ a full replacement, not a partial patch, so omitted fields become `null` (and
 - **Path Variable:** `id` (Long)
 - **Request Body (JSON):** Same fields and constraints as `POST`.
 - **Success Response:** `200 OK`
-- **Error Response:** `400 Bad Request` (validation), `404 Not Found` (if ID does not exist), `409 Conflict` (if the product was modified concurrently)
+- **Error Responses:** `400 Bad Request` (validation), `404 Not Found` (if ID does not exist), `409 Conflict` (if the product was changed concurrently , retry)
 
-> **`stock` is set authoritatively (decided behaviour).** `stock` represents
-> *available* stock (decremented when an order is created, restored when an order
-> is deleted), and this endpoint overwrites it with whatever value you send.
-> Because an open order's reservation is not taken into account, stock can end up
-> above the original total:
+> **`stock` is a restock.** The value you send becomes the new physical stock on
+> hand, regardless of how many carts or unpaid orders exist. That is safe now because
+> neither of those reserves anything: stock is only reduced when a sale is settled at
+> the cashier, and nothing ever adds it back. The old
+> `10 → order 3 → 7 → PUT 10 → delete order → 13` sequence can no longer happen ,
+> see [Stock semantics](#stock-semantics) below.
 >
-> ```text
-> stock 10 → create order for 3 → 7 → PUT stock=10 → delete the order → 13
-> ```
->
-> That is expected, not a defect. Treat the value you send as authoritative, and
-> avoid overwriting `stock` while orders are open if exact totals matter.
+> Sending a value lower than what has already been sold does not create a debt; it
+> simply states the shelf is emptier than the sales record implies.
 
 ### `DELETE /api/products/{id}`
 
@@ -103,11 +118,135 @@ Deletes a product by its ID.
 - **Success Response:** `204 No Content`
 - **Error Responses:**
   - `404 Not Found` (if ID does not exist)
-  - `409 Conflict` (if existing orders still reference the product , `order_items.product_id` is a foreign key). Body: `Product <id> cannot be deleted because it is referenced by existing orders`
+  - `409 Conflict` (if the product is still referenced). Two distinct bodies:
+    - `Product <id> cannot be deleted because it is referenced by existing orders` , `order_items.product_id` is a foreign key
+    - `Product <id> cannot be deleted because it is in a customer's cart` , `cart_items.product_id` is a foreign key
 
 ---
 
-## 2. Orders API (`/api/orders`)
+## 2. Carts API (`/api/carts/{customerId}`)
+
+There is no authentication yet, so a cart is addressed by a client-supplied
+`customerId` string in the path, for example `/api/carts/budi`. Anyone who knows the id
+can read and change that cart; that is an accepted limitation of this exercise, not a
+security boundary.
+
+**No endpoint in this section changes `products.stock`.**
+
+### `GET /api/carts/{customerId}`
+
+Returns the cart, or an empty cart when the customer has none.
+
+- **Success Response:** `200 OK`
+- **Body:** `CartResponse`
+- **Side effects:** none. Reading never creates a cart row.
+
+```json
+{
+  "customerId": "budi",
+  "items": [],
+  "totalItems": 0,
+  "totalPrice": 0,
+  "updatedAt": null
+}
+```
+
+### `POST /api/carts/{customerId}/items`
+
+Adds a product to the cart, creating the cart on first use.
+
+- **Request Body (JSON):**
+  - `productId`: Long (required, must exist)
+  - `quantity`: integer (required, `1`–`999`)
+- **Success Response:** `200 OK` , the whole updated cart
+- **Error Responses:**
+  - `400 Bad Request` , validation failure, or `Product with id <id> does not exist`
+
+```json
+{ "productId": 1, "quantity": 2 }
+```
+
+> **Adding the same product again accumulates.** The second call adds to the existing
+> quantity instead of creating a second line, because `cart_items` is unique on
+> `(cart_id, product_id)`. Adding 2 then 3 leaves one line with quantity 5.
+>
+> **Adding more than is in stock is allowed.** A cart does not reserve anything, and
+> blocking here would make the "buyer fixes the quantity" loop needlessly awkward. The
+> shortfall is reported at checkout.
+
+### `PUT /api/carts/{customerId}/items/{productId}`
+
+Sets the **absolute** quantity of a line, the way typing into a quantity box works.
+
+- **Path Variables:** `customerId` (String), `productId` (Long)
+- **Request Body (JSON):** `{ "quantity": 5 }` (required, `1`–`999`)
+- **Success Response:** `200 OK` , the whole updated cart
+- **Error Responses:** `400 Bad Request` (validation), `404 Not Found` (no such cart or no such line)
+
+> Sending `0` is rejected. To remove a line, use `DELETE`, so that "remove" has exactly
+> one meaning.
+
+### `DELETE /api/carts/{customerId}/items/{productId}`
+
+Removes one line from the cart.
+
+- **Success Response:** `204 No Content`
+- **Error Response:** `404 Not Found` (no such cart, or the product is not in it)
+
+### `DELETE /api/carts/{customerId}`
+
+Empties the cart, keeping the cart itself.
+
+- **Success Response:** `204 No Content`
+- **Error Response:** `404 Not Found` (no such cart, or it is already empty)
+
+### `POST /api/carts/{customerId}/checkout`
+
+Turns the cart into an order awaiting payment, and empties the cart.
+
+- **Request Body:** none
+- **Success Response:** `201 Created` , an `OrderResponse` with `status` = `PENDING_PAYMENT`
+- **Error Responses:**
+  - `404 Not Found` , no cart for this customer
+  - `400 Bad Request` , empty cart, or a product no longer has enough stock
+
+```json
+{
+  "id": 7,
+  "orderDate": "2026-09-23T10:15:30",
+  "status": "PENDING_PAYMENT",
+  "paidAt": null,
+  "items": [
+    { "productId": 1, "productName": "Laptop", "quantity": 2, "unitPrice": 15000000.00 }
+  ],
+  "totalPrice": 30000000.00
+}
+```
+
+| Condition | Status | Body |
+| --- | --- | --- |
+| Cart is empty | `400` | `Cart of customer <customerId> is empty` |
+| Not enough stock | `400` | `Insufficient stock for product: <name>` |
+
+> **Stock is not deducted here.** The availability check is a fast-fail courtesy so the
+> buyer is told immediately; it is a read and can go stale. The authoritative check runs
+> inside the database when the cashier is paid , see `POST /api/orders/{id}/pay`.
+>
+> **Prices are snapshotted here.** `unitPrice` is copied from the product at checkout and
+> never recalculated, so repricing a product later does not alter existing orders. A cart
+> shows live prices, so its total can legitimately differ from the order total if a
+> repricing happens in between.
+>
+> **The cart is emptied.** Leaving the lines behind would let the same items be checked
+> out twice.
+
+---
+
+## 3. Orders API (`/api/orders`)
+
+There is intentionally **no `POST /api/orders`** (it returns `405 Method Not Allowed`): an
+order is always born from a cart checkout, which is what keeps the line items consistent
+with what the buyer actually put in the cart.
 
 ### `GET /api/orders`
 
@@ -126,80 +265,73 @@ Retrieves a single order by its ID.
 - **Success Response:** `200 OK`
 - **Error Response:** `404 Not Found` (if ID does not exist)
 
-### `POST /api/orders`
+### `POST /api/orders/{id}/pay`
 
-Creates a new order. The API automatically snapshots the current `price` of each product into `unitPrice` and computes the order total.
+**The cashier action.** Confirms payment and settles the stock.
 
-- **Request Body (JSON):**
-  - `items`: array of objects (required, min 1 item).
-    - `productId`: Long (required, must exist in DB)
-    - `quantity`: integer (required, minimum 1)
-- **Success Response:** `201 Created`
+- **Path Variable:** `id` (Long)
+- **Request Body:** none
+- **Success Response:** `200 OK` , the order with `status` = `PAID` and a non-null `paidAt`
 - **Error Responses:**
-  - `400 Bad Request` (if validation fails, e.g., missing fields, quantity < 1, product ID does not exist, duplicate `productId`, or insufficient stock)
-  - `409 Conflict` (if a product row was modified concurrently by another request; retry the request)
-- **Side effects:** the ordered quantity is subtracted from each product's `stock`. Rejected requests leave stock untouched.
-
-```json
-{
-  "items": [
-    { "productId": 1, "quantity": 2 },
-    { "productId": 2, "quantity": 1 }
-  ]
-}
-```
-
-Response `201 Created`:
-
-```json
-{
-  "id": 1,
-  "orderDate": "2026-09-23T08:49:45",
-  "status": "PENDING",
-  "items": [
-    { "productId": 1, "productName": "Laptop", "quantity": 2, "unitPrice": 15000000.00 },
-    { "productId": 2, "productName": "Mouse", "quantity": 1, "unitPrice": 19.99 }
-  ],
-  "totalPrice": 30000019.99
-}
-```
-
-Exact error messages returned for this endpoint:
+  - `404 Not Found` (if ID does not exist)
+  - `409 Conflict` (if the order is not awaiting payment, or a product ran out of stock)
 
 | Condition | Status | Body |
 | --- | --- | --- |
-| Insufficient stock | `400` | `Insufficient stock for product: <name>` |
-| Unknown product | `400` | `Product with id <id> does not exist` |
-| Duplicate product in one order | `400` | `Duplicate productId <id>: each product may appear only once per order` |
-| Concurrent modification | `409` | `The product was modified by another request. Please retry.` |
+| Order already `PAID` | `409` | `Order <id> is PAID and can no longer be paid` |
+| Order `CANCELLED` | `409` | `Order <id> is CANCELLED and can no longer be paid` |
+| Not enough stock | `409` | `Insufficient stock for product: <name>` |
 
-> **Two-phase validation.** `OrderService.create()` validates the *entire* request
-> first (duplicate `productId`, product existence, sufficient stock) and only then
-> mutates stock. An invalid request therefore never leaves stock partially
-> decremented.
+**Side effects:** the ordered quantities are subtracted from each product's `stock`, in one
+atomic conditional `UPDATE` per product. This is the only operation in the whole API that
+reduces stock because of a sale.
+
+> **Why the failure is `409`, not `400`.** The request was valid when it was sent; the
+> conflict is with the *current state of the data*, and retrying the same request unchanged
+> will not help. The buyer must be given a chance to reduce the quantity.
 >
-> **Price snapshot.** `unitPrice` is copied from the product at order time and is
-> never recalculated, so later price changes do not alter existing orders.
+> **An order can never be half-settled.** If one product runs out, the whole transaction
+> rolls back, including decrements that already succeeded, and the order stays
+> `PENDING_PAYMENT`.
+>
+> **Two cashiers cannot oversell the last unit.** The availability check and the subtraction
+> are a single SQL statement, so the database arbitrates; the loser gets `409`. A
+> read-then-write implementation could not give this guarantee.
+
+### `POST /api/orders/{id}/cancel`
+
+Abandons an order that has not been paid.
+
+- **Path Variable:** `id` (Long)
+- **Request Body:** none
+- **Success Response:** `200 OK` , the order with `status` = `CANCELLED`
+- **Error Responses:**
+  - `404 Not Found` (if ID does not exist)
+  - `409 Conflict` , `Order <id> is <STATUS> and can no longer be cancelled`
+- **Side effects:** none. An unpaid order never deducted stock, so there is nothing to give back.
 
 ### `DELETE /api/orders/{id}`
 
-Deletes an order by its ID. This will also cascade and delete all associated order items.
+Deletes an order by its ID. This also cascades to its order items.
 
 - **Path Variable:** `id` (Long)
 - **Success Response:** `204 No Content`
-- **Error Response:** `404 Not Found` (if ID does not exist)
-- **Side effects:** the quantities consumed by the order are added back to each product's `stock`.
+- **Error Responses:**
+  - `404 Not Found` (if ID does not exist)
+  - `409 Conflict` , `Order <id> has been paid and cannot be deleted` (a `PAID` order is part of the sales record, and because stock is never restored, deleting it would make the stock count disagree with the record)
+- **Side effects:** none on stock.
+- **Allowed statuses:** `PENDING_PAYMENT` and `CANCELLED`.
 
 ---
 
-## 3. OpenAPI / Swagger Documentation
+## 4. OpenAPI / Swagger Documentation
 
 - `GET /swagger-ui.html` , Interactive Swagger UI.
 - `GET /v3/api-docs` , Raw OpenAPI 3 JSON specification.
 
 ---
 
-## 4. Error responses
+## 5. Error responses
 
 ### Service-layer exceptions
 
@@ -234,9 +366,37 @@ business-rule violations, JSON for validation failures.
 
 | Status | Meaning in this API |
 | --- | --- |
-| `200` | Read or update succeeded |
-| `201` | Resource created (`POST`) |
+| `200` | Read, cart update, payment or cancellation succeeded |
+| `201` | Resource created (`POST /api/products`, `POST /api/carts/{id}/checkout`) |
 | `204` | Deleted, no body (`DELETE`) |
-| `400` | Validation failure or business-rule violation (insufficient stock, unknown product, duplicate `productId`) |
-| `404` | Resource does not exist |
-| `409` | State conflict: product referenced by orders, concurrent modification, or constraint violation |
+| `400` | Validation failure, or a business-rule violation on the request itself (unknown product, empty cart, not enough stock at checkout) |
+| `404` | Resource does not exist (product, order, cart, or cart line) |
+| `405` | `POST /api/orders` , orders are created by a cart checkout |
+| `409` | State conflict: insufficient stock at payment, wrong order status, product still referenced, concurrent modification, constraint violation |
+
+---
+
+## Stock semantics
+
+`stock` is the **physical count on hand**, and it is the single source of truth for
+availability. It is written in exactly two places:
+
+- `POST` / `PUT /api/products` , sets it verbatim (a restock or a stock correction).
+- `POST /api/orders/{id}/pay` , subtracts the sold quantities.
+
+Nothing ever adds stock back, which is what makes the count trustworthy:
+
+- A cart reserves nothing, so it never needs releasing.
+- Cancelling or deleting an unpaid order changes no stock.
+- A paid order is terminal, so it can never be cancelled or deleted.
+
+```text
+stock 10  →  add 3 to a cart           →  stock 10
+          →  checkout                  →  stock 10   (order PENDING_PAYMENT)
+          →  PUT /api/products stock=10 →  stock 10
+          →  pay at the cashier         →  stock 7
+```
+
+The old design reached `13` in that sequence, because the order's reservation lived inside
+`stock` and a `DELETE` added it back on top of the value the `PUT` had already overwritten.
+That is now structurally impossible: there is no "restore" step left.

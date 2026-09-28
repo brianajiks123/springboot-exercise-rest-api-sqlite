@@ -11,7 +11,7 @@ This document describes every dependency declared in `pom.xml` , what it does an
 | `spring-boot-starter-validation` | managed by parent | compile | Bean validation (Jakarta Bean Validation). Enables `@Valid` and constraint annotations on DTOs. | `dto/*Request.java` (`@NotBlank`, `@Size`, `@NotNull`, `@Min`, `@DecimalMin`, `@Digits`, `@NotEmpty`), `controller/*Controller.java` (`@Valid @RequestBody`). |
 | `springdoc-openapi-starter-webmvc-ui` | `3.1.0` (explicit) | compile | Automatic API documentation: generates the OpenAPI 3 spec and serves Swagger UI. | `controller/*Controller.java` (`@Tag`, `@Operation`), `dto/*` (`@Schema`). Endpoints: `/swagger-ui.html`, `/v3/api-docs`. |
 | `h2` (com.h2database) | `2.4.240` (managed by parent) | compile | H2 JDBC driver **and** the embedded database engine. Connects the application to the file-based H2 database. No explicit `<version>` in `pom.xml`. | `application.properties` , `spring.datasource.url=jdbc:h2:file:./demo1db;AUTO_SERVER=TRUE`, `driver-class-name=org.h2.Driver`. Also the in-memory test datasource. |
-| `spring-boot-starter-webmvc-test` | managed by parent | test | Test-only starter (not packaged into the production jar). Provides JUnit 5, MockMvc, `@SpringBootTest` and `@AutoConfigureMockMvc`. | `Demo1ApplicationTests.java` (context smoke test), `service/OrderServiceStockTest.java` (stock validation, decrement & restore), `controller/ApiContractTest.java` (HTTP contract via MockMvc). |
+| `spring-boot-starter-webmvc-test` | managed by parent | test | Test-only starter (not packaged into the production jar). Provides JUnit 5, MockMvc, `@SpringBootTest`, `@AutoConfigureMockMvc` and `RestTestClient`. | `Demo1ApplicationTests.java` (context smoke test), `service/CartServiceTest.java` (cart behaviour & checkout), `service/OrderPaymentFlowTest.java` (payment, rollback, concurrency), `controller/ApiContractTest.java` (HTTP contract via MockMvc), `e2e/CashierFlowEndToEndTest.java` (the same flow over real HTTP against a file-backed database). |
 
 ## Detailed notes
 
@@ -38,7 +38,8 @@ Spring Data JPA starter combining Spring Data repositories and Hibernate. Provid
 - Derived query methods , `OrderItemRepository.countByProductId(Long)` is generated from its name alone.
 - Entity lifecycle: `@Entity`, `@Id`, `@Column`, `@Table`, `@ManyToOne`, `@OneToMany`, `@Version`, `@UniqueConstraint`.
 - Transaction management (`@Transactional`, including `readOnly = true`).
-- Query hints / fetch plans: `@EntityGraph` is used by `OrderRepository` to avoid the N+1 problem when serializing orders.
+- Query hints / fetch plans: `@EntityGraph` is used by `OrderRepository` and `CartRepository` to avoid the N+1 problem when serializing orders and carts.
+- Bulk updates: `@Modifying` plus `@Query` on `ProductRepository.decrementStockIfAvailable` issues the conditional stock decrement as one atomic statement, which is what makes concurrent payments safe.
 
 ### spring-boot-starter-validation
 
@@ -48,10 +49,12 @@ Enables Jakarta Bean Validation 3.0. Used with `@Valid` on the request body to a
 - `@Size` , length limits (`name` max 255, `description` max 2000).
 - `@NotNull` , field is required (`price`, `stock`, `productId`, `quantity`).
 - `@Min` , numeric lower bound (`quantity >= 1`, `stock >= 0`).
+- `@Max` , numeric upper bound (`quantity <= 999` on cart lines).
 - `@DecimalMin` , decimal lower bound (`price >= 0.0`).
 - `@Digits(integer = 17, fraction = 2)` , precision guard on `price`, matching the `NUMERIC(19,2)` column.
-- `@NotEmpty` , ensures lists (like order items) are not empty (`OrderRequest.items`).
-- `@Valid` , cascades validation into each element of `List<@Valid OrderItemRequest>`.
+- `@Valid` , placed on the controller parameter so the whole request body is validated before the
+  method body runs. Note that the request DTOs are flat records now, so there is no longer a nested
+  `List<@Valid ...>` cascade.
 
 ### springdoc-openapi-starter-webmvc-ui
 
@@ -77,11 +80,13 @@ spring.datasource.password=
 > (error 50100, SQLState `HYC00`). With that combination the application fails to
 > start. Keep only one of the two options.
 >
-> **Why the tests do not catch this:** `src/test/resources/application.properties`
-> replaces the datasource URL with `jdbc:h2:mem:demo1test;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE`.
-> The production URL is therefore never exercised by the test suite , the
-> combination above was only discovered by actually booting the packaged jar.
-> Note that `DB_CLOSE_ON_EXIT=FALSE` *is* legal there, because that URL has no
+> **Which test covers it:** `src/test/resources/application.properties` replaces the datasource
+> URL with `jdbc:h2:mem:demo1test;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE`, so the four
+> in-memory test classes never exercise the production URL. `CashierFlowEndToEndTest` does: its
+> `e2e` profile opens a file-backed H2 with `AUTO_SERVER=TRUE` and without
+> `DB_CLOSE_ON_EXIT=FALSE`, and asserts that shape directly. The combination above is therefore
+> now caught by the build instead of only by booting the packaged jar. Note that
+> `DB_CLOSE_ON_EXIT=FALSE` *is* legal in the in-memory profile, because that URL has no
 > `AUTO_SERVER=TRUE`.
 
 Why H2 instead of SQLite:
@@ -92,7 +97,7 @@ Why H2 instead of SQLite:
 
 ### spring-boot-starter-webmvc-test
 
-Test scope only , not included in the final jar. Provides integration-test infrastructure (`@SpringBootTest`, JUnit 5, MockMvc support, `@AutoConfigureMockMvc`). Used by all three test classes: the context smoke test, the order/stock service tests, and the HTTP contract tests.
+Test scope only , not included in the final jar. Provides integration-test infrastructure (`@SpringBootTest`, JUnit 5, MockMvc support, `@AutoConfigureMockMvc`, and `RestTestClient` from `spring-test`). Used by all five test classes: the context smoke test, the cart and payment service tests, the HTTP contract tests, and the end-to-end test that drives a real HTTP server.
 
 > **Spring Boot 4 rename + package move:** `spring-boot-starter-test` is now
 > `spring-boot-starter-webmvc-test`, and `@AutoConfigureMockMvc` **moved package**
@@ -101,6 +106,13 @@ Test scope only , not included in the final jar. Provides integration-test infra
 > `MockMvc` itself did not move: it stays in `org.springframework.test.web.servlet`
 > (with `...request.MockMvcRequestBuilders` and `...result.MockMvcResultMatchers`).
 > Importing the old `AutoConfigureMockMvc` package does not compile on Boot 4.
+>
+> **`TestRestTemplate` is not usable here.** This starter also pulls in
+> `spring-boot-resttestclient`, which offers `TestRestTemplate`, but its autoconfiguration needs
+> `RestTemplateBuilder` from the `spring-boot-restclient` module. A webmvc-only application does
+> not have that module, so the application context fails to start with
+> `NoClassDefFoundError: org/springframework/boot/restclient/RestTemplateBuilder`. Use
+> `RestTestClient` instead, which needs nothing beyond `spring-test` and `spring-web`.
 
 ## Removed dependencies
 

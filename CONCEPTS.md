@@ -22,13 +22,13 @@ In a REST API there is no HTML page, so JSON plays the role of the View.
 Client (HTTP request)
     │
     ▼
-ProductController / OrderController   ← Controller: takes the URL/method, calls the service
+ProductController / CartController / OrderController   ← Controller: takes the URL/method, calls the service
     │
     ▼
-ProductService / OrderService         ← Model: holds the business logic
+ProductService / CartService / OrderService            ← Model: holds the business logic
     │
     ▼
-ProductRepository / OrderRepository   ← talks to the database (via JPA/Hibernate)
+ProductRepository / CartRepository / OrderRepository   ← talks to the database (via JPA/Hibernate)
     │
     ▼
 H2 database
@@ -36,7 +36,7 @@ H2 database
 
 **Key idea:** the Controller never touches the database. It delegates to the Service, which delegates to the Repository.
 
-**Related file:** `controller/ProductController.java`, `controller/OrderController.java`, `service/ProductService.java`, `service/OrderService.java`.
+**Related file:** `controller/ProductController.java`, `controller/CartController.java`, `controller/OrderController.java`, `service/ProductService.java`, `service/CartService.java`, `service/OrderService.java`.
 
 ### Layered architecture in practice
 
@@ -120,8 +120,14 @@ public interface ProductRepository extends JpaRepository<Product, Long> { }
 ```
 
 Hibernate also implements **dirty checking**: inside a transaction, mutating a managed entity is enough
-to have the change persisted , there is no explicit `save()` call needed. `OrderService.create()` relies
-on this when it does `product.setStock(...)` and then saves only the `Order`.
+to have the change persisted , no explicit `save()` call is required. This project still calls `save()`
+explicitly (`OrderService.pay()`, `ProductService.update()`), which is harmless on an entity that is
+already managed: it just makes the intent obvious.
+
+The stock decrement in `OrderService.pay()` is the deliberate exception. It is a **bulk `UPDATE`**
+(`ProductRepository.decrementStockIfAvailable`) that bypasses dirty checking and the persistence context
+entirely, precisely so that the availability check and the subtraction happen inside one atomic
+statement , see [Optimistic locking](#optimistic-locking-version) below.
 
 **Key idea:**
 
@@ -230,7 +236,7 @@ If validation fails, Spring returns `400 Bad Request` automatically , you write 
 express rules that depend on other data , "is there enough stock?", "does this product exist?". Those are
 business rules and live in the service layer, which is why both mechanisms exist in this project.
 
-**Related file:** `dto/ProductRequest.java`, `dto/OrderRequest.java`, `dto/OrderItemRequest.java`.
+**Related file:** `dto/ProductRequest.java`, `dto/CartItemRequest.java`.
 
 ### Records as DTOs
 
@@ -255,7 +261,7 @@ In Spring you do not manage `commit`/`rollback` yourself , you declare a boundar
 
 ```java
 @Transactional
-public OrderResponse create(OrderRequest request) { ... }
+public OrderResponse pay(Long id) { ... }
 
 @Transactional(readOnly = true)
 public List<OrderResponse> findAll() { ... }
@@ -269,15 +275,20 @@ What the annotation does:
 - If a transactional method calls another one, the inner call joins the existing transaction by default
   (`Propagation.REQUIRED`) , there is one physical transaction, not two.
 
-**Why it matters here:** `OrderService.create()` throws `IllegalArgumentException` when stock is
-insufficient. Because the method is transactional, that exception rolls the whole unit back, so no
-partially decremented stock can survive. Combined with the two-phase structure (validate everything,
-then mutate), a rejected order leaves the database exactly as it was.
+**Why it matters here:** `OrderService.pay()` throws `ConflictException` when a product runs out of
+stock mid-payment. Because the method is transactional, that exception rolls the whole unit back ,
+including the decrements that already succeeded for earlier line items , so an order can never be left
+half-settled. Combined with the two-phase structure (validate everything, then mutate), a rejected
+request leaves the database exactly as it was.
 
 > **Important for tests:** a test annotated with `@Transactional` would make the service join the *test's*
 > transaction, which Spring rolls back at the end. Assertions like "stock was left untouched" would then
-> pass for the wrong reason. `OrderServiceStockTest` deliberately omits `@Transactional` so each service
-> call really commits.
+> pass for the wrong reason. `CartServiceTest`, `OrderPaymentFlowTest` and `CashierFlowEndToEndTest`
+> deliberately omit `@Transactional` so each call really commits. That is also what makes the two
+> concurrency tests meaningful , `concurrentPayments_cannotOversellTheLastUnit` at the service level, and
+> `simultaneousCashiers_overRealHttp_onlyOneWinsTheLastUnit` with five genuinely parallel HTTP requests:
+> the competing threads have to see each other's committed writes, which they would not inside one shared
+> test transaction.
 
 ---
 
@@ -305,7 +316,15 @@ The application maps that to `409 Conflict` with the message
 `The product was modified by another request. Please retry.`
 
 **Key idea:** the client is expected to *retry*, not to be blocked. `Product` has `@Version`;
-`Order`/`OrderItem` do not, so concurrent edits to an order are not protected.
+`Order`, `OrderItem`, `Cart` and `CartItem` do not, so concurrent edits to those rows are not protected
+by optimistic locking. The order lifecycle is guarded by explicit status checks instead.
+
+> **Here, `@Version` is not the main defence against overselling.** The payment path uses a single
+> conditional `UPDATE` (`... WHERE id = ? AND stock >= ?`), which *prevents* the lost update rather than
+> detecting it afterwards , see [Stock semantics](ENDPOINTS.md#stock-semantics). Optimistic locking still
+> protects the plain read-modify-write in `PUT /api/products/{id}`, and the payment's decrement bumps
+> `version` by hand, so a concurrent `PUT` fails its version check instead of silently overwriting a
+> settled sale.
 
 ---
 
@@ -373,9 +392,10 @@ spring.jpa.open-in-view=false
 ```
 
 **Consequence:** lazy associations must be loaded **inside** the transactional service method. That is
-why `OrderResponse.from(order)` (which reads `order.getItems()` and `item.getProduct().getName()`) is
-always called from inside a `@Transactional` service method, and why `OrderRepository` declares
-`@EntityGraph` on `findById` too , the delete path needs the items as well.
+why `OrderResponse.from(order)` (which reads `order.getItems()` and `item.getProduct().getName()`) and
+`CartResponse.from(cart)` (which reads `cart.getItems()` and `item.getProduct().getPrice()`) are always
+called from inside a `@Transactional` service method, and why `OrderRepository` and `CartRepository`
+declare `@EntityGraph` , the delete and checkout paths need the items as well.
 
 With the flag off, a missing fetch plan fails loudly (`LazyInitializationException`) instead of
 quietly degrading performance.
@@ -464,19 +484,43 @@ Jackson               serializes ProductResponse to JSON, sent back to client
 And the write path, including the error branch:
 
 ```text
-HTTP POST /api/orders
+HTTP POST /api/carts/{customerId}/checkout
         │
         ▼
-OrderController        @Valid OrderRequest , bean validation runs first
+CartController         path variable only, no request body
         │
         ▼
-OrderService.create()  @Transactional
-        ├── pass 1: duplicate productId? product exists? enough stock?
-        │           → on failure: throw IllegalArgumentException
-        ├── pass 2: decrement stock, attach items, save the order
+CartService.checkout() @Transactional
+        ├── pass 1: cart empty? every product still in stock?
+        │           → on failure: throw IllegalArgumentException (400)
+        ├── pass 2: snapshot each price, build the order, save it,
+        │           then empty the cart
+        │           → stock is NOT touched here
         │
         ▼
-Hibernate              INSERT/UPDATE + optimistic-locking version check
+Hibernate              INSERT orders + INSERT order_items
+```
+
+And the one path that does write stock:
+
+```text
+HTTP POST /api/orders/{id}/pay
+        │
+        ▼
+OrderController        path variable only, no request body
+        │
+        ▼
+OrderService.pay()     @Transactional
+        ├── status must be PENDING_PAYMENT, else ConflictException (409)
+        ├── sort the items by productId (fixed lock order, no deadlock)
+        ├── per item: UPDATE products SET stock = stock - qty, version = version + 1
+        │             WHERE id = ? AND stock >= qty
+        │             → 0 rows updated: ConflictException (409) and the whole
+        │               transaction rolls back, so nothing is half-settled
+        └── set status = PAID, paidAt = now
+        │
+        ▼
+Hibernate              one conditional UPDATE per product, then UPDATE orders
         │
         ▼
 GlobalExceptionHandler maps the exception to 400 / 409 and writes the body
