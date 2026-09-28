@@ -254,6 +254,43 @@ class ApiContractTest {
     }
 
     @Test
+    void addItem_pastTheLineLimit_returns400WithMessage() throws Exception {
+        Long productId = givenProduct("Bulk", "1.00", 5000);
+        String customerId = newCustomer();
+        addToCart(customerId, productId, 999);
+
+        mockMvc.perform(post("/api/carts/{customerId}/items", customerId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(cartItemJson(productId, 1)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value(
+                        "Product Bulk would reach 1000 units in the cart, but a cart line holds at most 999"));
+
+        mockMvc.perform(get("/api/carts/{customerId}", customerId))
+                .andExpect(jsonPath("$.totalItems").value(999));
+    }
+
+    @Test
+    void quantityAboveTheLimit_returns400OnBothAddAndSet() throws Exception {
+        Long productId = givenProduct("TooMuch", "1.00", 5000);
+        String customerId = newCustomer();
+
+        mockMvc.perform(post("/api/carts/{customerId}/items", customerId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(cartItemJson(productId, 1000)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors.quantity").value("quantity must be at most 999"));
+
+        addToCart(customerId, productId, 1);
+
+        mockMvc.perform(put("/api/carts/{customerId}/items/{productId}", customerId, productId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"quantity\":1000}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors.quantity").value("quantity must be at most 999"));
+    }
+
+    @Test
     void updateItemQuantity_setsAbsoluteValue() throws Exception {
         Long productId = givenProduct("Monitor", "100.00", 10);
         String customerId = newCustomer();

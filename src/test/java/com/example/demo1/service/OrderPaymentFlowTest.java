@@ -10,6 +10,7 @@ import com.example.demo1.repository.ProductRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.dao.OptimisticLockingFailureException;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
@@ -132,6 +133,24 @@ class OrderPaymentFlowTest {
 
         long after = productRepository.findById(product.getId()).orElseThrow().getVersion();
         assertTrue(after > before, "settling a sale must advance the version, was " + before + " now " + after);
+    }
+
+    @Test
+    void aStaleProductWrite_isRejectedRatherThanOverwritingASettledSale() {
+        Product product = givenProduct("Stale", 100.0, 10);
+        Product staleCopy = productRepository.findById(product.getId()).orElseThrow();
+
+        OrderResponse order = orderAwaitingPayment(product, 3);
+        orderService.pay(order.id());
+        assertEquals(7, stockOf(product.getId()));
+
+        staleCopy.setStock(999);
+
+        // OptimisticLockingFailureException, not its Object... subclass, because that is exactly the
+        // type GlobalExceptionHandler maps to 409. If this ever stops being thrown, the stale write
+        // would silently overwrite the sale and the handler would never be reached.
+        assertThrows(OptimisticLockingFailureException.class, () -> productRepository.save(staleCopy));
+        assertEquals(7, stockOf(product.getId()), "the settled sale must survive the stale write");
     }
 
     // ----------------------------------------------------------------- cancel

@@ -5,6 +5,7 @@ import com.example.demo1.dto.CartResponse;
 import com.example.demo1.dto.OrderResponse;
 import com.example.demo1.exception.BadRequestException;
 import com.example.demo1.exception.NotFoundException;
+import com.example.demo1.model.CartItem;
 import com.example.demo1.model.Order;
 import com.example.demo1.model.Product;
 import com.example.demo1.repository.CartRepository;
@@ -16,6 +17,7 @@ import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -357,5 +359,87 @@ class CartServiceTest {
             assertEquals(1 + writers, cartService.getCart(customer).totalItems(),
                     "round " + round + ": every accepted addItem must survive in the cart");
         }
+    }
+
+    @Test
+    void concurrentCheckoutOfTheSameCart_createsOneOrderAndTellsTheLoserTheCartIsEmpty() throws Exception {
+        Product product = givenProduct("Checkout race", 10.0, 100);
+
+        for (int round = 0; round < 5; round++) {
+            String customer = newCustomer();
+            cartService.addItem(customer, new CartItemRequest(product.getId(), 1));
+
+            // Any exception other than BadRequestException propagates out of race(...) and fails the
+            // test with its real cause. That is deliberate: the misleading 409 this replaced came
+            // from an ObjectOptimisticLockingFailureException escaping here.
+            Callable<String> checkout = () -> {
+                try {
+                    cartService.checkout(customer);
+                    return "ORDERED";
+                } catch (BadRequestException ex) {
+                    return ex.getMessage().contains("is empty") ? "EMPTY" : "BAD:" + ex.getMessage();
+                }
+            };
+
+            List<String> outcomes = race(checkout, checkout);
+
+            assertEquals(List.of("EMPTY", "ORDERED"), outcomes.stream().sorted().toList(),
+                    "round " + round + ": one checkout must win and the other must be told the cart is empty");
+            assertEquals(100, stockOf(product.getId()),
+                    "round " + round + ": checkout never deducts stock, so nothing may be deducted here");
+        }
+    }
+
+    private static List<String> race(Callable<String> first, Callable<String> second) throws Exception {
+        CountDownLatch startGate = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            List<Future<String>> results = new ArrayList<>();
+            for (Callable<String> action : List.of(first, second)) {
+                results.add(pool.submit(() -> {
+                    startGate.await();
+                    return action.call();
+                }));
+            }
+
+            startGate.countDown();
+
+            List<String> outcomes = new ArrayList<>();
+            for (Future<String> result : results) {
+                outcomes.add(result.get(30, TimeUnit.SECONDS));
+            }
+            return outcomes;
+        } finally {
+            pool.shutdownNow();
+            assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS), "race threads did not stop");
+        }
+    }
+
+    // --------------------------------------------------------- quantity limit
+
+    @Test
+    void addItem_pastTheLineLimit_isRejectedAndLeavesTheLineAlone() {
+        Product product = givenProduct("Bulk", 1.0, 5000);
+        String customer = newCustomer();
+        cartService.addItem(customer, new CartItemRequest(product.getId(), CartItem.MAX_QUANTITY));
+
+        BadRequestException ex = assertThrows(BadRequestException.class,
+                () -> cartService.addItem(customer, new CartItemRequest(product.getId(), 1)));
+
+        assertTrue(ex.getMessage().contains("holds at most " + CartItem.MAX_QUANTITY), ex.getMessage());
+        assertEquals(CartItem.MAX_QUANTITY, cartService.getCart(customer).totalItems(),
+                "a rejected add must leave the line exactly as it was");
+    }
+
+    @Test
+    void addItem_aNewLineAtTheLimit_isAllowed() {
+        Product product = givenProduct("Bulk new line", 1.0, 5000);
+        String customer = newCustomer();
+
+        CartResponse cart = cartService.addItem(customer,
+                new CartItemRequest(product.getId(), CartItem.MAX_QUANTITY));
+
+        assertEquals(CartItem.MAX_QUANTITY, cart.totalItems(),
+                "the limit is on the line, so a fresh line may be filled right up to it");
     }
 }
